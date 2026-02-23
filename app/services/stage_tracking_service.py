@@ -160,8 +160,39 @@ class StageTrackingService:
         if tracking.stage_history:
             self.db[STAGE_HISTORY_COLLECTION].insert_one(tracking.stage_history[0].dict())
         
+        # Emit file created event to ClickHouse
+        try:
+            from app.services.clickhouse_lifecycle_service import clickhouse_lifecycle_service
+            # Get permit file info for name
+            permit_file = self.db.permit_files.find_one({"file_id": file_id})
+            file_name = permit_file.get("file_name", file_id) if permit_file else file_id
+            
+            # Emit synchronously
+            clickhouse_lifecycle_service.emit_file_lifecycle_event(
+                file_id=file_id,
+                event_type="FILE_CREATED",
+                stage=initial_stage.value,
+                employee_code=None,
+                employee_name=None,
+                event_data={"file_name": file_name}
+            )
+            logger.info(f"Emitted file_created event to ClickHouse for {file_id}")
+        except Exception as e:
+            logger.warning(f"Failed to emit file_created event to ClickHouse: {e}")
+        
         logger.info(f"Initialized tracking for file {file_id} at stage {initial_stage}")
         return tracking
+
+    def _get_next_stage(self, current_stage: FileStage) -> Optional[FileStage]:
+        """Get the next stage in the workflow"""
+        stage_flow = {
+            FileStage.PRELIMS: FileStage.PRODUCTION,
+            FileStage.PRODUCTION: FileStage.COMPLETED,
+            FileStage.COMPLETED: FileStage.QC,  # Will be handled by manager
+            FileStage.QC: FileStage.DELIVERED,
+            FileStage.DELIVERED: None
+        }
+        return stage_flow.get(current_stage)
 
     def auto_progress_from_tasks(self, file_id: str) -> Optional[FileTracking]:
         tracking_doc = self.get_file_tracking(file_id)
@@ -317,14 +348,14 @@ class StageTrackingService:
                         employee_name=assignment_employee_name,
                         stage=before_stage_value,
                         duration_minutes=current_hist.total_duration_minutes or 0,
-                        file_id=file_id,
+                        file_id_param=file_id,
                     )
                     clickhouse_service.emit_stage_started_event(
                         task_id=f"FILE-{file_id}",
                         employee_code="",
                         employee_name="",
                         stage=new_stage_value,
-                        file_id=file_id,
+                        file_id_param=file_id,
                     )
                 except Exception:
                     pass
@@ -528,7 +559,7 @@ class StageTrackingService:
                 employee_name=tracking.current_assignment.employee_name if tracking.current_assignment else '',
                 stage=tracking.current_stage.value,
                 duration_minutes=duration_minutes,
-                file_id=file_id
+                file_id_param=file_id
             )
         except Exception as e:
             logger.warning(f"Failed to emit stage_completed event: {e}")
@@ -741,7 +772,7 @@ class StageTrackingService:
                 employee_name="",
                 stage="COMPLETED",
                 duration_minutes=0,  # Immediate progression, no work duration
-                file_id=file_id
+                file_id_param=file_id
             )
             
             # Also emit stage_started for COMPLETED to track the transition
@@ -750,7 +781,7 @@ class StageTrackingService:
                 employee_code="",
                 employee_name="",
                 stage="COMPLETED",
-                file_id=file_id
+                file_id_param=file_id
             )
             
         except Exception as e:
@@ -815,7 +846,7 @@ class StageTrackingService:
                 employee_name=tracking.current_assignment.employee_name if tracking.current_assignment else "",
                 stage="QC",
                 duration_minutes=0,  # Immediate progression, no additional work duration
-                file_id=file_id
+                file_id_param=file_id
             )
             
             # Also emit stage_started for DELIVERED to track the transition
@@ -824,7 +855,7 @@ class StageTrackingService:
                 employee_code="",
                 employee_name="",
                 stage="DELIVERED",
-                file_id=file_id
+                file_id_param=file_id
             )
             
         except Exception as e:

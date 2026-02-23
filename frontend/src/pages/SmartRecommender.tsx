@@ -446,7 +446,8 @@ export default function SmartRecommender() {
         finalTaskDescription,
         assignedBy,
         effectiveFileId,
-        assignmentMode === 'recommendation-only' ? 'smart' : 'manual'
+        assignmentMode === 'recommendation-only' ? 'smart' : 'manual',
+        address.trim() || undefined // Pass address if provided
       );
 
       const trackingMode = effectiveFileId ? 'FILE_BASED' : 'STANDALONE';

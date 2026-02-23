@@ -51,10 +51,74 @@ class ClickHouseLifecycleService:
             # Update current state table
             self._update_current_state(file_id, event_type, event, previous_state)
             
+            # Also update file_lifecycle table for dashboard
+            if event_type == 'FILE_CREATED':
+                self._update_file_lifecycle(file_id, event)
+            elif event_type in ['STAGE_STARTED', 'STAGE_ASSIGNED']:
+                self._update_file_lifecycle_stage(file_id, event)
+            
             logger.info(f"✅ Emitted lifecycle event {event_type} for file {file_id}")
             
         except Exception as e:
             logger.error(f"Failed to emit lifecycle event for {file_id}: {e}")
+
+    def _update_file_lifecycle(self, file_id: str, event: Dict):
+        """Update the file_lifecycle table for dashboard view"""
+        if not CLICKHOUSE_ENABLED:
+            return
+        
+        try:
+            # Parse event_data for file name
+            event_data = json.loads(event.get('event_data', '{}'))
+            file_name = event_data.get('file_name', file_id)
+            
+            # Insert/update file_lifecycle record
+            lifecycle_record = {
+                'file_id': file_id,
+                'current_stage': event['stage'],
+                'current_status': 'IN_PRELIMS',  # Default status for new files
+                'uploaded_at': event['event_time'],
+                'sla_deadline': None,  # Will be set when task is assigned
+                'last_updated': event['event_time']
+            }
+            
+            clickhouse_service.client.execute(
+                'INSERT INTO task_analytics.file_lifecycle (*) VALUES',
+                [lifecycle_record]
+            )
+            
+            logger.info(f"Updated file_lifecycle for {file_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to update file_lifecycle for {file_id}: {e}")
+
+    def _update_file_lifecycle_stage(self, file_id: str, event: Dict):
+        """Update file_lifecycle when stage changes"""
+        if not CLICKHOUSE_ENABLED:
+            return
+        
+        try:
+            # Update the stage in file_lifecycle
+            clickhouse_service.client.execute(
+                """
+                ALTER TABLE task_analytics.file_lifecycle 
+                UPDATE current_stage = %(stage)s,
+                       current_status = %(status)s,
+                       last_updated = %(updated)s
+                WHERE file_id = %(file_id)s
+                """,
+                {
+                    'file_id': file_id,
+                    'stage': event['stage'],
+                    'status': f"IN_{event['stage']}",
+                    'updated': event['event_time']
+                }
+            )
+            
+            logger.info(f"Updated file_lifecycle stage for {file_id} to {event['stage']}")
+            
+        except Exception as e:
+            logger.error(f"Failed to update file_lifecycle stage for {file_id}: {e}")
 
     def _get_current_state(self, file_id: str) -> Optional[Dict]:
         """Get current state of a file"""

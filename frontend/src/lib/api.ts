@@ -368,7 +368,8 @@ export async function assignTaskToEmployee(
   taskDescription: string,
   assignedBy: string,
   fileId?: string,
-  assignmentSource: string = 'manual'
+  assignmentSource: string = 'manual',
+  address?: string
 ): Promise<unknown> {
   apiDebugLog(`[API] Creating and assigning task to ${employeeCode}`);
   
@@ -386,6 +387,7 @@ export async function assignTaskToEmployee(
         description: taskDescription,
         skills_required: [],
         id: fileId, // Use 'id' for MySQL field mapping to file_id
+        address: address, // Include address for MySQL lookup
         creatorparentid: assignedBy, // MySQL field for assigned_by
         due_date: null,
         estimated_hours: null,

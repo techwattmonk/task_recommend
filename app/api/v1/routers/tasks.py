@@ -9,6 +9,7 @@ import uuid
 import logging
 import sys
 import os
+import asyncio
 
 # Add temporal_workflows to path
 sys.path.append('/home/user/smart_task_assignee/task_recommend/temporal_workflows')
@@ -63,6 +64,7 @@ class TaskCreateMySQL(BaseModel):
     skills_required: Optional[List[str]] = []
     file_id: Optional[str] = None  # MongoDB field
     id: Optional[str] = None  # MySQL field for file_id
+    address: Optional[str] = None  # Address for MySQL lookup
     assigned_by: Optional[str] = None
     creatorparentid: Optional[str] = None  # MySQL field for assigned_by
     due_date: Optional[str] = None
