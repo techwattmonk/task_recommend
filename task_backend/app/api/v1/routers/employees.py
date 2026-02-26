@@ -366,7 +366,7 @@ async def get_available_managers(db = Depends(get_db)):
 async def get_employees_with_managers() -> List[Dict[str, Any]]:
     """Get all employees with full reporting manager information"""
     db = get_db()
-    employees = list(db.employee.find({}, {"_id": 0}))
+    employees = list(db.employee.find({}, {"_id": 0, "embedding": 0}))  # Exclude embedding for performance
     
     # Transform data to include full manager information
     transformed_employees = []
@@ -533,7 +533,7 @@ async def get_available_employees(
 async def get_employees() -> List[Dict[str, Any]]:
     """Get all employees from MongoDB"""
     db = get_db()
-    employees = list(db.employee.find({}, {"_id": 0}))  # Include all fields except _id
+    employees = list(db.employee.find({}, {"_id": 0, "embedding": 0}))  # Exclude _id and embedding for performance
     
     # Transform data to match expected frontend format
     transformed_employees = []
@@ -559,7 +559,7 @@ async def get_employees() -> List[Dict[str, Any]]:
             "employee_status": {
                 "availability": "ACTIVE" if emp.get("status_1") == "Permanent" else "INACTIVE"
             },
-            "embedding": emp.get("embedding", []),  # Single embedding
+            # embedding: emp.get("embedding", []),  # Removed for performance
             "metadata": emp.get("metadata", {})
         }
         transformed_employees.append(transformed_emp)
@@ -580,7 +580,7 @@ async def get_employees_grouped_by_team_lead():
         employees = list(db.employee.find(
             {"status_1": "Permanent"},
             {
-                "_id": 0,
+                "_id": 0,  # Only _id can be excluded with inclusion projection
                 "employee_code": 1,
                 "employee_name": 1,
                 "reporting_manager": 1,

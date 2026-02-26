@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 
 class Settings(BaseSettings):
@@ -10,6 +11,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     mongodb_uri: str = "mongodb://localhost:27017"  # Default, will be overridden by .env
+    mongodb_url: str = Field(default="mongodb://localhost:27017", alias="mongodb_uri")  # For compatibility
     mongodb_db: str = "task_assignee"
 
     redis_url: str = "redis://localhost:6379/0"
@@ -20,7 +22,7 @@ class Settings(BaseSettings):
     disable_rbac: bool = False
 
     jwt_secret: str = "change_me"
-    jwt_algorithm: str = "HS256"
+    jwt_algorithm: str = Field("HS256", env="JWT_ALGORITHM")
     access_token_expire_minutes: int = 60
     refresh_token_expire_days: int = 7
 
@@ -53,6 +55,11 @@ class Settings(BaseSettings):
     mysql_ssh_port: int = 22
     mysql_ssh_user: str | None = None
     mysql_ssh_key_path: str = "prod-key.pem"
+    
+    # ClickHouse Configuration
+    clickhouse_host: str = Field(default="localhost")
+    clickhouse_port: int = Field(default=9000)
+    clickhouse_database: str = Field(default="task_analytics")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False)
 

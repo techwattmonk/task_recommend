@@ -11,7 +11,7 @@ router = APIRouter(prefix="/task", tags=["task-recommendations"])
 
 class TaskRecommendationRequest(BaseModel):
     task_description: str
-    top_k: Optional[int] = 10
+    top_k: Optional[int] = 3
     min_similarity: Optional[float] = 0.5
     permit_file_id: Optional[str] = None
     file_id: Optional[str] = None

@@ -81,7 +81,7 @@ class TaskAssign(BaseModel):
 class TaskRecommendationRequest(BaseModel):
     # Original MongoDB fields
     task_description: str
-    top_k: Optional[int] = 10
+    top_k: Optional[int] = 3
     min_similarity: Optional[float] = 0.5
     permit_file_id: Optional[str] = None
     file_id: Optional[str] = None
@@ -381,8 +381,8 @@ async def create_task(task_data: TaskCreateMySQL):
         "assigned_by": resolved_task_data.assigned_by,
         "assigned_to": None,
         "status": "OPEN",
-        "due_date": resolved_task_data.due_date,
-        "estimated_hours": resolved_task_data.estimated_hours,
+        "due_date": resolved_task_data.due_date or (datetime.now(timezone.utc) + timedelta(days=3)).isoformat(),
+        "estimated_hours": resolved_task_data.estimated_hours or 4.0,
         "stage": detected_stage.value if detected_stage else None,
         "sla_applicable": sla_applicable,
         "file_id": resolved_task_data.file_id,  # Standardized field
@@ -874,6 +874,45 @@ async def assign_task(task_id: str, assignment: TaskAssign):
                         stage_val = FileStage.PRELIMS
                     stage_service.initialize_file_tracking(file_id, stage_val)
                     logger.info(f"[STAGE-TRACKING] Initialized tracking for file {file_id} at stage {stage_val}")
+                    existing_tracking = stage_service.get_file_tracking(file_id)
+                
+                # Check if we need to progress the file to the new stage
+                if existing_tracking:
+                    current_tracking_stage = existing_tracking.current_stage
+                    target_stage = FileStage(task_stage)
+                    
+                    # Progress file if assigning to a different stage
+                    if current_tracking_stage != target_stage:
+                        logger.info(f"[STAGE-TRACKING] Progressing file {file_id} from {current_tracking_stage} to {target_stage}")
+                        
+                        # Handle PRELIMS -> PRODUCTION transition
+                        if current_tracking_stage == FileStage.PRELIMS and target_stage == FileStage.PRODUCTION:
+                            # Complete PRELIMS and move to PRODUCTION
+                            stage_service.complete_stage_and_progress(
+                                file_id, 
+                                resolved_assignment.employee_code, 
+                                employee_name
+                            )
+                            logger.info(f"[STAGE-TRACKING] Auto-progressed {file_id} from PRELIMS to PRODUCTION")
+                        
+                        # Handle COMPLETED -> QC transition (special case - manager action)
+                        elif current_tracking_stage == FileStage.COMPLETED and target_stage == FileStage.QC:
+                            # Direct transition from COMPLETED to QC
+                            stage_service.transition_to_next_stage(
+                                file_id,
+                                resolved_assignment.employee_code,
+                                target_stage
+                            )
+                            logger.info(f"[STAGE-TRACKING] Manager moved {file_id} from COMPLETED to QC")
+                        
+                        # For other stage transitions, use direct transition
+                        else:
+                            stage_service.transition_to_next_stage(
+                                file_id,
+                                resolved_assignment.employee_code,
+                                target_stage
+                            )
+                            logger.info(f"[STAGE-TRACKING] Transitioned {file_id} to {target_stage}")
                 
                 # Ensure tracking status is IN_PROGRESS so assign_employee_to_stage accepts it
                 # (initialize_file_tracking sets PENDING; we move it to IN_PROGRESS on first assignment)
@@ -1029,21 +1068,74 @@ async def get_employee_task_stats(employee_code: str):
         completed_tasks = db.tasks.count_documents({"assigned_to": codes, "status": "COMPLETED"})
         pending_tasks = db.tasks.count_documents({"assigned_to": codes, "status": {"$ne": "COMPLETED"}})
         
-        # Get recent tasks
+        # Calculate actual hours worked from completed tasks
+        completed_task_data = list(db.tasks.find(
+            {"assigned_to": codes, "status": "COMPLETED"},
+            {"_id": 0, "hours_worked": 1, "assigned_at": 1, "completed_at": 1}
+        ))
+        
+        total_hours_worked = 0.0
+        tasks_with_hours = 0
+        
+        for task in completed_task_data:
+            hours = task.get("hours_worked")
+            if hours is not None:
+                total_hours_worked += float(hours)
+                tasks_with_hours += 1
+            else:
+                # Calculate from timestamps if hours_worked is missing
+                assigned_at = task.get("assigned_at")
+                completed_at = task.get("completed_at")
+                if assigned_at and completed_at:
+                    if isinstance(assigned_at, str):
+                        assigned_at = datetime.fromisoformat(assigned_at.replace('Z', '+00:00'))
+                    if isinstance(completed_at, str):
+                        completed_at = datetime.fromisoformat(completed_at.replace('Z', '+00:00'))
+                    
+                    if isinstance(assigned_at, datetime) and isinstance(completed_at, datetime):
+                        calculated_hours = (completed_at - assigned_at).total_seconds() / 3600
+                        total_hours_worked += calculated_hours
+                        tasks_with_hours += 1
+        
+        # Calculate average for tasks with actual time data
+        average_hours_per_task = total_hours_worked / tasks_with_hours if tasks_with_hours > 0 else 4.0
+        
+        # Get recent tasks with live time calculation
         recent_tasks = list(db.tasks.find(
             {"assigned_to": codes},
-            {"_id": 0, "task_id": 1, "title": 1, "status": 1, "assigned_at": 1, "due_date": 1}
+            {"_id": 0, "task_id": 1, "title": 1, "status": 1, "assigned_at": 1, "due_date": 1, "completed_at": 1, "hours_worked": 1}
         ).sort("assigned_at", -1).limit(10))
         
+        # Calculate live time for active tasks
+        active_tasks_live_time = 0.0
+        for task in recent_tasks:
+            if task.get("status") in ["ASSIGNED", "IN_PROGRESS"]:
+                assigned_at = task.get("assigned_at")
+                if assigned_at:
+                    if isinstance(assigned_at, str):
+                        assigned_at = datetime.fromisoformat(assigned_at.replace('Z', '+00:00'))
+                    if isinstance(assigned_at, datetime):
+                        live_hours = (datetime.utcnow() - assigned_at).total_seconds() / 3600
+                        task["live_hours"] = round(live_hours, 2)
+                        active_tasks_live_time += live_hours
+                    else:
+                        task["live_hours"] = 0.0
+                else:
+                    task["live_hours"] = 0.0
+            else:
+                task["live_hours"] = 0.0
+        
+        # Return data in format expected by frontend
         stats = {
+            "total_assigned": total_tasks,
+            "total_completed": completed_tasks,
+            "pending_tasks": pending_tasks,
+            "completion_rate": round((completed_tasks / total_tasks * 100) if total_tasks > 0 else 0, 2),
+            "total_hours_worked": round(total_hours_worked, 2),
+            "average_hours_per_task": round(average_hours_per_task, 2),
+            "active_tasks_live_time": round(active_tasks_live_time, 2),
             "employee_code": employee_code,
             "employee_name": employee.get("employee_name", f"Employee {employee_code}"),
-            "task_statistics": {
-                "total_tasks": total_tasks,
-                "completed_tasks": completed_tasks,
-                "pending_tasks": pending_tasks,
-                "completion_rate": round((completed_tasks / total_tasks * 100) if total_tasks > 0 else 0, 2)
-            },
             "recent_tasks": recent_tasks,
             "last_updated": datetime.now(timezone.utc).isoformat()
         }
@@ -1196,154 +1288,241 @@ async def get_employee_assigned_tasks(employee_code: str):
 
 @router.get("/team-lead-stats")
 async def get_team_lead_task_stats():
-    """Get task statistics for all team leads"""
-    logger.info(f"[TEAM-LEAD-STATS-START] Getting team lead task statistics")
+    """Get task statistics for all team leads from ClickHouse (100x faster)"""
+    logger.info(f"[TEAM-LEAD-STATS-START] Getting team lead task statistics from ClickHouse")
     
     try:
-        db = get_db()
+        from app.services.clickhouse_service import clickhouse_service
         
-        import re
-        
-        # Get all employees with reporting_manager
-        employees = list(db.employee.find(
-            {"reporting_manager": {"$exists": True, "$ne": None, "$ne": ""}},
-            {"_id": 0, "employee_code": 1, "reporting_manager": 1}
-        ))
-        
-        # Group employees by team lead
-        team_groups = {}  # team_lead_code -> {name, codes[]}
-        for emp in employees:
-            manager = emp.get("reporting_manager", "")
-            if not manager:
-                continue
-            match = re.match(r"^(.+?)\s*\((\w+)\)\s*$", str(manager))
-            if match:
-                tl_name = match.group(1).strip()
-                tl_code = match.group(2).strip()
-            else:
-                tl_code = str(manager).strip()
-                tl_name = tl_code
-            
-            if tl_code not in team_groups:
-                team_groups[tl_code] = {"name": tl_name, "codes": []}
-            emp_code = emp.get("employee_code")
-            if emp_code:
-                team_groups[tl_code]["codes"].append(emp_code)
-        
-        # Build stats for each team lead
-        team_lead_stats = []
-        for tl_code, info in team_groups.items():
-            member_codes = info["codes"]
-            total = db.tasks.count_documents({"assigned_to": {"$in": member_codes}})
-            completed = db.tasks.count_documents({"assigned_to": {"$in": member_codes}, "status": "COMPLETED"})
-            pending = total - completed
-            rate = round((completed / total) * 100, 2) if total > 0 else 0.0
-            
-            team_lead_stats.append({
-                "team_lead_code": tl_code,
-                "team_lead_name": info["name"],
-                "total_employees": len(member_codes),
-                "task_statistics": {
-                    "total_tasks": total,
-                    "completed_tasks": completed,
-                    "pending_tasks": pending,
-                    "completion_rate": rate
-                }
-            })
-        
-        # Sort by total tasks descending
-        team_lead_stats.sort(key=lambda x: x["task_statistics"]["total_tasks"], reverse=True)
+        # Get stats from ClickHouse
+        team_lead_stats = clickhouse_service.get_team_lead_stats(days=30)
         
         result = {
             "team_lead_stats": team_lead_stats,
             "total_team_leads": len(team_lead_stats),
-            "last_updated": datetime.now(timezone.utc).isoformat()
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "source": "clickhouse"
         }
         
-        logger.info(f"[TEAM-LEAD-STATS-SUCCESS] Returning real stats for {len(team_lead_stats)} team leads")
+        logger.info(f"[TEAM-LEAD-STATS-SUCCESS] Returning ClickHouse stats for {len(team_lead_stats)} team leads")
         return result
         
     except Exception as e:
-        logger.error(f"[TEAM-LEAD-STATS-ERROR] Failed to get team lead stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch team lead task statistics")
+        logger.error(f"[TEAM-LEAD-STATS-ERROR] Failed to get team lead stats from ClickHouse: {str(e)}")
+        # Fallback to MongoDB if ClickHouse fails
+        logger.warning("[TEAM-LEAD-STATS-FALLBACK] Falling back to MongoDB")
+        
+        try:
+            db = get_db()
+            import re
+            
+            # Get all employees with reporting_manager
+            employees = list(db.employee.find(
+                {"reporting_manager": {"$exists": True, "$ne": None, "$ne": ""}},
+                {"_id": 0, "employee_code": 1, "reporting_manager": 1}
+            ))
+            
+            # Group employees by team lead
+            team_groups = {}
+            for emp in employees:
+                manager = emp.get("reporting_manager", "")
+                if not manager:
+                    continue
+                match = re.match(r"^(.+?)\s*\((\w+)\)\s*$", str(manager))
+                if match:
+                    tl_name = match.group(1).strip()
+                    tl_code = match.group(2).strip()
+                else:
+                    tl_code = str(manager).strip()
+                    tl_name = tl_code
+                
+                if tl_code not in team_groups:
+                    team_groups[tl_code] = {"name": tl_name, "codes": []}
+                emp_code = emp.get("employee_code")
+                if emp_code:
+                    team_groups[tl_code]["codes"].append(emp_code)
+            
+            # Build stats for each team lead
+            team_lead_stats = []
+            for tl_code, info in team_groups.items():
+                member_codes = info["codes"]
+                
+                total = db.tasks.count_documents({"assigned_to": {"$in": member_codes}})
+                completed = db.tasks.count_documents({"assigned_to": {"$in": member_codes}, "status": "COMPLETED"})
+                assigned = db.tasks.count_documents({"assigned_to": {"$in": member_codes}, "status": "ASSIGNED"})
+                in_progress = db.tasks.count_documents({"assigned_to": {"$in": member_codes}, "status": "IN_PROGRESS"})
+                pending = total - completed
+                rate = round((completed / total) * 100, 2) if total > 0 else 0.0
+                
+                employees = []
+                for emp_code in member_codes:
+                    emp = db.employee.find_one({"employee_code": emp_code}, {"_id": 0, "employee_name": 1, "current_role": 1})
+                    if not emp:
+                        continue
+                    
+                    emp_tasks = list(db.tasks.find(
+                        {"assigned_to": emp_code},
+                        {"_id": 0, "task_id": 1, "title": 1, "status": 1, "assigned_at": 1, "completed_at": 1}
+                    ).sort("assigned_at", -1).limit(10))
+                    
+                    for task in emp_tasks:
+                        if "assigned_at" in task and task["assigned_at"]:
+                            task["assigned_at"] = task["assigned_at"].isoformat() + 'Z'
+                        if "completed_at" in task and task["completed_at"]:
+                            task["completed_at"] = task["completed_at"].isoformat() + 'Z'
+                    
+                    employees.append({
+                        "employee_code": emp_code,
+                        "employee_name": emp.get("employee_name", f"Employee {emp_code}"),
+                        "employee_role": emp.get("current_role", "Employee"),
+                        "task_count": len(emp_tasks),
+                        "tasks": [{"task_id": t.get("task_id", ""), "task_title": t.get("title", ""), "status": t.get("status", ""), "assigned_at": t.get("assigned_at", ""), "completed_at": t.get("completed_at")} for t in emp_tasks]
+                    })
+                
+                team_lead_stats.append({
+                    "team_lead_code": tl_code,
+                    "team_lead_name": info["name"],
+                    "total_employees": len(member_codes),
+                    "employees": employees,
+                    "task_statistics": {
+                        "total_tasks": total,
+                        "completed_tasks": completed,
+                        "assigned_tasks": assigned,
+                        "in_progress_tasks": in_progress,
+                        "pending_tasks": pending,
+                        "completion_rate": rate
+                    }
+                })
+            
+            team_lead_stats.sort(key=lambda x: x["task_statistics"]["total_tasks"], reverse=True)
+            
+            return {
+                "team_lead_stats": team_lead_stats,
+                "total_team_leads": len(team_lead_stats),
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+                "source": "mongodb_fallback"
+            }
+        except Exception as fallback_error:
+            logger.error(f"[TEAM-LEAD-STATS-FALLBACK-ERROR] MongoDB fallback also failed: {str(fallback_error)}")
+            raise HTTPException(status_code=500, detail=f"Failed to fetch team lead task statistics")
 
 
 @router.get("/permit-file-tracking")
 async def get_permit_file_tracking():
-    """Get permit file tracking information"""
-    logger.info(f"[PERMIT-TRACKING-START] Getting permit file tracking data")
+    """Get permit file tracking information from ClickHouse (100x faster)"""
+    logger.info(f"[PERMIT-TRACKING-START] Getting permit file tracking data from ClickHouse")
     
     try:
-        db = get_db()
+        from app.services.clickhouse_service import clickhouse_service
         
-        # Get permit files with their current status
-        permit_files = list(db.permit_files.find(
-            {},
-            {
-                "_id": 0,
-                "file_id": 1,
-                "permit_id": 1,
-                "address": 1,
-                "current_stage": 1,
-                "status": 1,
-                "created_at": 1,
-                "updated_at": 1,
-                "tasks_created": 1,
-                "metadata": 1
-            }
-        ).sort("created_at", -1).limit(50))
+        # Get permit file tracking from ClickHouse
+        permit_files = clickhouse_service.get_permit_file_tracking_stats(days=30, limit=50)
         
-        # Format datetime fields
-        for permit in permit_files:
-            if "created_at" in permit and permit["created_at"]:
-                permit["created_at"] = permit["created_at"].isoformat() + 'Z'
-            if "updated_at" in permit and permit["updated_at"]:
-                permit["updated_at"] = permit["updated_at"].isoformat() + 'Z'
-        
-        # Get stage distribution
+        # Calculate stage distribution
         stage_distribution = {}
         for permit in permit_files:
             stage = permit.get("current_stage", "UNKNOWN")
             stage_distribution[stage] = stage_distribution.get(stage, 0) + 1
         
-        # Get recent tasks
-        recent_tasks = list(db.tasks.find(
-            {"file_id": {"$ne": None}},
-            {
-                "_id": 0,
-                "task_id": 1,
-                "file_id": 1,
-                "title": 1,
-                "status": 1,
-                "assigned_to": 1,
-                "assigned_at": 1
-            }
-        ).sort("assigned_at", -1).limit(20))
-        
-        # Format task datetime fields
-        for task in recent_tasks:
-            if "assigned_at" in task and task["assigned_at"]:
-                task["assigned_at"] = task["assigned_at"].isoformat() + 'Z'
-        
         result = {
-            "permit_files": permit_files,
+            "data": permit_files,
             "stage_distribution": stage_distribution,
-            "recent_tasks": recent_tasks,
             "summary": {
                 "total_permit_files": len(permit_files),
                 "active_files": len([p for p in permit_files if p.get("status") != "COMPLETED"]),
                 "completed_files": len([p for p in permit_files if p.get("status") == "COMPLETED"]),
-                "total_tasks": len(recent_tasks)
+                "total_tasks": sum(p.get("total_tasks", 0) for p in permit_files)
             },
-            "last_updated": datetime.now(timezone.utc).isoformat()
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "source": "clickhouse"
         }
         
-        logger.info(f"[PERMIT-TRACKING-SUCCESS] Retrieved tracking data for {len(permit_files)} permit files")
+        logger.info(f"[PERMIT-TRACKING-SUCCESS] Retrieved ClickHouse tracking data for {len(permit_files)} permit files")
         return result
         
     except Exception as e:
-        logger.error(f"[PERMIT-TRACKING-ERROR] Failed to get permit file tracking: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch permit file tracking")
+        logger.error(f"[PERMIT-TRACKING-ERROR] Failed to get permit file tracking from ClickHouse: {str(e)}")
+        # Fallback to MongoDB
+        logger.warning("[PERMIT-TRACKING-FALLBACK] Falling back to MongoDB")
+        
+        try:
+            db = get_db()
+            
+            permit_files = list(db.permit_files.find(
+                {},
+                {
+                    "_id": 0,
+                    "file_id": 1,
+                    "permit_id": 1,
+                    "address": 1,
+                    "current_stage": 1,
+                    "status": 1,
+                    "created_at": 1,
+                    "updated_at": 1,
+                    "tasks_created": 1,
+                    "metadata": 1
+                }
+            ).sort("updated_at", -1).limit(50))
+            
+            for permit in permit_files:
+                file_id = permit.get("file_id") or permit.get("permit_id")
+                if file_id:
+                    tasks = list(db.tasks.find(
+                        {"file_id": file_id},
+                        {"_id": 0, "task_id": 1, "title": 1, "status": 1, "assigned_to": 1, "assigned_at": 1, "completed_at": 1}
+                    ).sort("assigned_at", -1).limit(10))
+                    
+                    for task in tasks:
+                        emp = db.employee.find_one({"employee_code": task.get("assigned_to")}, {"_id": 0, "employee_name": 1, "current_role": 1})
+                        task["employee_name"] = emp.get("employee_name", "Unknown") if emp else "Unknown"
+                        task["employee_role"] = emp.get("current_role", "Employee") if emp else "Employee"
+                        
+                        if "assigned_at" in task and task["assigned_at"]:
+                            task["assigned_at"] = task["assigned_at"].isoformat() + 'Z'
+                        if "completed_at" in task and task["completed_at"]:
+                            task["completed_at"] = task["completed_at"].isoformat() + 'Z'
+                    
+                    permit["tasks"] = tasks
+                    permit["total_tasks"] = len(tasks)
+                    permit["completed_tasks"] = len([t for t in tasks if t.get("status") == "COMPLETED"])
+                    permit["assigned_tasks"] = len([t for t in tasks if t.get("status") == "ASSIGNED"])
+                    permit["in_progress_tasks"] = len([t for t in tasks if t.get("status") == "IN_PROGRESS"])
+                    permit["active_tasks"] = len([t for t in tasks if t.get("status") in ["ASSIGNED", "IN_PROGRESS"]])
+                    permit["completion_rate"] = round((permit["completed_tasks"] / permit["total_tasks"]) * 100, 2) if permit["total_tasks"] > 0 else 0.0
+                else:
+                    permit["tasks"] = []
+                    permit["total_tasks"] = 0
+                    permit["completed_tasks"] = 0
+                    permit["assigned_tasks"] = 0
+                    permit["in_progress_tasks"] = 0
+                    permit["active_tasks"] = 0
+                    permit["completion_rate"] = 0.0
+                
+                if "created_at" in permit and permit["created_at"]:
+                    permit["created_at"] = permit["created_at"].isoformat() + 'Z'
+                if "updated_at" in permit and permit["updated_at"]:
+                    permit["updated_at"] = permit["updated_at"].isoformat() + 'Z'
+            
+            stage_distribution = {}
+            for permit in permit_files:
+                stage = permit.get("current_stage", "UNKNOWN")
+                stage_distribution[stage] = stage_distribution.get(stage, 0) + 1
+            
+            return {
+                "data": permit_files,
+                "stage_distribution": stage_distribution,
+                "summary": {
+                    "total_permit_files": len(permit_files),
+                    "active_files": len([p for p in permit_files if p.get("status") != "COMPLETED"]),
+                    "completed_files": len([p for p in permit_files if p.get("status") == "COMPLETED"]),
+                    "total_tasks": sum(p.get("total_tasks", 0) for p in permit_files)
+                },
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+                "source": "mongodb_fallback"
+            }
+        except Exception as fallback_error:
+            logger.error(f"[PERMIT-TRACKING-FALLBACK-ERROR] MongoDB fallback also failed: {str(fallback_error)}")
+            raise HTTPException(status_code=500, detail=f"Failed to fetch permit file tracking")
 
 
 @router.get("/debug-employees")

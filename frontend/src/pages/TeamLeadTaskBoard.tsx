@@ -82,8 +82,8 @@ interface TeamLeadStats {
   team_lead_name: string;
   total_tasks: number;
   completed_tasks: number;
-  in_progress_tasks: number;
-  assigned_tasks: number;
+  in_progress_tasks: number;  // Tasks with status IN_PROGRESS only
+  assigned_tasks: number;     // Tasks with status ASSIGNED only
   completion_rate: number;
   unique_employees: number;  // Actual unique employee count
   employees: TeamTaskItem[];
@@ -91,12 +91,12 @@ interface TeamLeadStats {
 
 interface PermitFile {
   file_id: string;
-  permit_file_id?: string; // Backward compatibility
   file_name?: string;
   total_tasks: number;
   completed_tasks: number;
-  in_progress_tasks: number;
   assigned_tasks: number;
+  in_progress_tasks: number;
+  active_tasks: number;
   completion_rate: number;
   status: string;
   tasks: PermitTaskItem[];
@@ -128,12 +128,27 @@ export default function TeamLeadTaskBoard() {
       loadTeamLeadData(false); // Silent refresh without loading indicator
     }, 60000);
     
-    return () => clearInterval(interval);
+    // Listen for task assignment events
+    const handleTaskAssigned = () => {
+      console.log('Task assigned event received, refreshing data...');
+      loadTeamLeadData(false); // Refresh when task is assigned
+    };
+    
+    window.addEventListener('task_assigned', handleTaskAssigned);
+    
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('task_assigned', handleTaskAssigned);
+    };
   }, []);
 
   const loadTeamLeadData = async (showLoading = true) => {
     if (showLoading) setIsLoading(true);
     try {
+      // Clear cache to force fresh data
+      localStorage.removeItem('team_lead_task_stats');
+      localStorage.removeItem('permit_file_tracking');
+      
       // Load team lead stats and permit file tracking in parallel
       const [teamData, permitData] = await Promise.all([
         getTeamLeadTaskStats(),
@@ -147,8 +162,8 @@ export default function TeamLeadTaskBoard() {
         team_lead_name: item.team_lead_name,
         total_tasks: item.task_statistics?.total_tasks ?? item.total_tasks ?? 0,
         completed_tasks: item.task_statistics?.completed_tasks ?? item.completed_tasks ?? 0,
-        in_progress_tasks: item.task_statistics?.pending_tasks ?? item.in_progress_tasks ?? 0,
-        assigned_tasks: item.task_statistics?.total_tasks ?? item.assigned_tasks ?? 0,
+        in_progress_tasks: item.task_statistics?.in_progress_tasks ?? item.in_progress_tasks ?? 0,
+        assigned_tasks: item.task_statistics?.assigned_tasks ?? item.assigned_tasks ?? 0,
         completion_rate: item.task_statistics?.completion_rate ?? item.completion_rate ?? 0,
         unique_employees: item.total_employees ?? item.unique_employees ?? 0,
         employees: item.employees || [],
@@ -388,8 +403,8 @@ export default function TeamLeadTaskBoard() {
                             {employee.tasks.length > 0 && (
                               <div className="border-t">
                                 <div className="p-3 space-y-2">
-                                  {employee.tasks.map((task) => (
-                                    <div key={task.task_id} className="flex items-center justify-between p-2 bg-background rounded border">
+                                  {employee.tasks.map((task, taskIndex) => (
+                                    <div key={`${employee.employee_code}-${task.task_id}-${taskIndex}`} className="flex items-center justify-between p-2 bg-background rounded border">
                                       <div className="flex-1">
                                         <p className="text-sm font-medium">{task.task_title}</p>
                                         <p className="text-xs text-muted-foreground">
@@ -505,8 +520,8 @@ export default function TeamLeadTaskBoard() {
                     </CollapsibleTrigger>
                     <CollapsibleContent>
                       <CardContent className="space-y-3">
-                        {permitFile.tasks.map((task) => (
-                          <div key={task.task_id} className="flex items-center justify-between p-3 rounded-lg border">
+                        {permitFile.tasks.map((task, taskIndex) => (
+                          <div key={`${permitFile.file_id}-${task.task_id}-${taskIndex}`} className="flex items-center justify-between p-3 rounded-lg border">
                               <div className="flex-1">
                                 <div className="flex items-center gap-2 mb-1">
                                   <p className="font-medium">{task.employee_name}</p>

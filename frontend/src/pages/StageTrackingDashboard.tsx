@@ -167,11 +167,11 @@ const StageTrackingDashboard: React.FC = () => {
       const totalPenalties = breaches.reduce((sum, b) => sum + Math.round((b.duration_minutes - b.max_minutes) / 60) * 10, 0);
       
       const newMetrics = {
-        totalFiles,
-        activeFiles,
-        completedFiles,
-        totalBreaches,
-        totalPenalties
+        totalFiles: totalFiles || 0,
+        activeFiles: activeFiles || 0,
+        completedFiles: completedFiles || 0,
+        totalBreaches: totalBreaches || 0,
+        totalPenalties: totalPenalties || 0
       };
 
       if (isDebugEnabled) {
@@ -217,6 +217,7 @@ const StageTrackingDashboard: React.FC = () => {
   };
 
   const formatDuration = (minutes: number) => {
+    if (!minutes || isNaN(minutes) || minutes < 0) return 'N/A';
     if (minutes < 60) return `${minutes}m`;
     const hours = Math.floor(minutes / 60);
     const mins = minutes % 60;
@@ -224,6 +225,7 @@ const StageTrackingDashboard: React.FC = () => {
   };
 
   const getProgressPercentage = (duration: number, maxDuration: number) => {
+    if (!maxDuration || maxDuration <= 0) return 0;
     return Math.min((duration / maxDuration) * 100, 100);
   };
 
@@ -294,17 +296,17 @@ const StageTrackingDashboard: React.FC = () => {
               <span className={getStatusColor(slaStatus)}>
                 {slaStatus === 'within_ideal' ? '✓ On Track' : slaStatus === 'over_ideal' ? '⚠ Over Ideal' : '⚠ Over Max'}
               </span>
-              <span>{Math.round(progressPercentage)}%</span>
+              <span>{isNaN(progressPercentage) ? '0%' : `${Math.round(progressPercentage)}%`}</span>
             </div>
             <div className="relative">
               <Progress 
-                value={Math.min(progressPercentage, 100)} 
+                value={isNaN(progressPercentage) ? 0 : Math.min(progressPercentage, 100)} 
                 className="h-2"
               />
               <div 
                 className="absolute top-0 left-0 h-2 rounded-full transition-all duration-300"
                 style={{ 
-                  width: `${Math.min(progressPercentage, 100)}%`,
+                  width: `${isNaN(progressPercentage) ? 0 : Math.min(progressPercentage, 100)}%`,
                   backgroundColor: getProgressColor(progressPercentage, slaStatus)
                 }}
               />

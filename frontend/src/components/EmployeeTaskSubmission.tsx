@@ -7,29 +7,18 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogTrigger } from "@/components/ui/dialog";
 import { CheckCircle2, Clock, Calendar, Send } from "lucide-react";
-import { getMyTasks, submitTaskCompletion } from "@/lib/api";
+import { getMyTasks, submitTaskCompletion, type MyTasksResponse, type AssignedTaskApi } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
-
-interface Task {
-  task_id: string;
-  title: string;
-  description?: string;
-  assigned_at: string;
-  status: string;
-  completion_time?: string;
-  completion_notes?: string;
-  hours_taken?: number;
-}
 
 interface EmployeeTaskSubmissionProps {
   employeeCode: string;
 }
 
 export default function EmployeeTaskSubmission({ employeeCode }: EmployeeTaskSubmissionProps) {
-  const [assignedTasks, setAssignedTasks] = useState<Task[]>([]);
-  const [completedTasks, setCompletedTasks] = useState<Task[]>([]);
+  const [assignedTasks, setAssignedTasks] = useState<AssignedTaskApi[]>([]);
+  const [completedTasks, setCompletedTasks] = useState<AssignedTaskApi[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [selectedTask, setSelectedTask] = useState<AssignedTaskApi | null>(null);
   const [completionNotes, setCompletionNotes] = useState("");
   const [hoursWorked, setHoursWorked] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -41,7 +30,7 @@ export default function EmployeeTaskSubmission({ employeeCode }: EmployeeTaskSub
 
   const loadTasks = async () => {
     try {
-      const data = await getMyTasks(employeeCode);
+      const data: MyTasksResponse = await getMyTasks(employeeCode);
       setAssignedTasks(data.assigned_tasks || []);
       setCompletedTasks(data.completed_tasks || []);
     } catch (error) {
@@ -125,14 +114,14 @@ export default function EmployeeTaskSubmission({ employeeCode }: EmployeeTaskSub
               <p>No tasks assigned to you</p>
             </div>
           ) : (
-            assignedTasks.map((task) => (
-              <div key={task.task_id} className="flex items-center justify-between p-4 border rounded-lg">
+            assignedTasks.map((task, index) => (
+              <div key={`assigned-${task.task_id}-${index}`} className="flex items-center justify-between p-4 border rounded-lg">
                 <div className="flex-1">
                   <h4 className="font-medium">{task.title}</h4>
                   <div className="flex items-center gap-2 mt-1 text-sm text-muted-foreground">
                     <Calendar className="h-3 w-3" />
                     <span>
-                      Assigned: {task.assigned_at ? new Date(task.assigned_at).toLocaleDateString() : 'No date'}
+                      Assigned: {task.assigned_at ? new Date(task.assigned_at as string).toLocaleDateString() : 'No date'}
                     </span>
                     <Badge variant="outline">{task.status}</Badge>
                   </div>
@@ -222,14 +211,14 @@ export default function EmployeeTaskSubmission({ employeeCode }: EmployeeTaskSub
             <CardTitle>Completed Tasks</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            {completedTasks.map((task) => (
-              <div key={task.task_id} className="flex items-center justify-between p-3 border rounded-lg bg-green-50">
+            {completedTasks.map((task, index) => (
+              <div key={`completed-${task.task_id}-${index}`} className="flex items-center justify-between p-3 border rounded-lg bg-green-50">
                 <div>
                   <h4 className="font-medium">{task.title}</h4>
                   <div className="flex items-center gap-2 mt-1 text-sm text-muted-foreground">
                     <CheckCircle2 className="h-3 w-3 text-green-600" />
                     <span>
-                      Completed: {task.completion_time ? new Date(task.completion_time).toLocaleDateString() : 'Recently'}
+                      Completed: {task.completion_time ? new Date(task.completion_time as string).toLocaleDateString() : 'Recently'}
                     </span>
                   </div>
                 </div>

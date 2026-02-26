@@ -97,6 +97,10 @@ class SyncService:
         except Exception as e:
             logger.error(f"Failed to sync SLA breach: {e}")
     
+    async def sync_data(self, since: Optional[datetime] = None):
+        """Manual sync method - alias for sync_recent_data"""
+        return await self.sync_recent_data()
+    
     async def get_sync_status(self):
         """Get current sync status"""
         return {

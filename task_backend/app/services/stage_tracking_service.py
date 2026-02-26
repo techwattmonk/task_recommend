@@ -602,9 +602,13 @@ class StageTrackingService:
         if isinstance(tracking, dict):
             tracking = FileTracking(**tracking)
         
-        # Validate that current stage is completed
+        # Validate that current stage is completed (except for COMPLETED -> QC transition)
         if tracking.stage_history and tracking.stage_history[-1].status != "COMPLETED":
-            raise ValueError(f"Current stage {tracking.current_stage} must be completed before transition")
+            # Allow COMPLETED -> QC transition as special case
+            if tracking.current_stage == FileStage.COMPLETED and next_stage == FileStage.QC:
+                logger.info(f"[STAGE-TRACKING] Allowing COMPLETED -> QC transition for file {file_id}")
+            else:
+                raise ValueError(f"Current stage {tracking.current_stage} must be completed before transition")
         
         # Transition
         tracking = transition_to_next_stage(tracking, next_stage)
@@ -1592,6 +1596,54 @@ class StageTrackingService:
                 logger.info(f"[PERMIT-SYNC] Synced permit_files {file_id} → {real_stage} / {real_status}")
         except Exception as ps_err:
             logger.warning(f"[PERMIT-SYNC-WARN] Could not sync permit_files for {file_id}: {ps_err}")
+
+        # Sync ClickHouse with the new stage
+        try:
+            from app.services.clickhouse_service import clickhouse_service
+            if clickhouse_service.client:
+                # Update file_lifecycle table
+                clickhouse_service.update_file_stage(file_id, real_stage)
+                logger.info(f"[CLICKHOUSE-SYNC] Updated file_lifecycle {file_id} → {real_stage}")
+                
+                # Emit a sync event to update task_events table
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                # Create a sync event with current timestamp to override stale data
+                current_time = datetime.utcnow()
+                sync_event = f"""
+                    INSERT INTO task_events (
+                        task_id, employee_code, employee_name, stage, status,
+                        assigned_at, completed_at, duration_minutes, file_id,
+                        tracking_mode, event_type, task_name
+                    ) VALUES (
+                        'SYNC-{file_id}-{current_time.strftime("%Y%m%d%H%M%S")}',
+                        'SYSTEM',
+                        'System Sync',
+                        '{real_stage}',
+                        'COMPLETED' if real_stage == 'COMPLETED' else 'IN_PROGRESS',
+                        '{current_time.isoformat()}',
+                        '{current_time.isoformat()}',
+                        0,
+                        '{file_id}',
+                        'FILE_BASED',
+                        'task_sync',
+                        'Stage Sync Event'
+                    )
+                """
+                
+                loop.run_until_complete(
+                    asyncio.create_task(
+                        asyncio.to_thread(clickhouse_service.client.execute, sync_event)
+                    )
+                )
+                logger.info(f"[CLICKHOUSE-SYNC] Emitted sync event for {file_id} → {real_stage}")
+        except Exception as ch_err:
+            logger.warning(f"[CLICKHOUSE-SYNC-WARN] Could not sync ClickHouse for {file_id}: {ch_err}")
 
         return {
             "success": True,

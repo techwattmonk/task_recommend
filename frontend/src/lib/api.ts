@@ -57,7 +57,8 @@ function apiDebugLog(...args: unknown[]): void {
 
 type JsonObject = Record<string, unknown>;
 
-type AssignedTaskApi = JsonObject & {
+export type AssignedTaskApi = JsonObject & {
+  task_id?: string;
   status?: string;
   employee_details?: {
     employee_name?: string;
@@ -74,6 +75,9 @@ type AssignedTaskApi = JsonObject & {
   task_description?: string;
   assigned_at?: string;
   time_assigned?: string;
+  completed_at?: string;
+  completion_notes?: string;
+  hours_worked?: number;
 };
 
 type AssignedTasksResponse =
@@ -94,6 +98,11 @@ type EmployeeAssignedTasksResponse = {
   };
   tasks: AssignedTaskApi[];
   total: number;
+};
+
+export type MyTasksResponse = {
+  assigned_tasks: AssignedTaskApi[];
+  completed_tasks: AssignedTaskApi[];
 };
 
 type TeamLeadTaskStatsResponse = {
@@ -290,8 +299,8 @@ export async function getEmployees(): Promise<Employee[]> {
   const cached = localStorage.getItem(cacheKey);
   const cacheTime = localStorage.getItem(`${cacheKey}_time`);
   
-  // Use cache if less than 10 minutes old
-  if (cached && cacheTime && (Date.now() - parseInt(cacheTime)) < 600000) {
+  // Use cache if less than 30 minutes old (optimized for employee data)
+  if (cached && cacheTime && (Date.now() - parseInt(cacheTime)) < 1800000) {
     apiDebugLog('[API] Using cached employees data');
     return JSON.parse(cached);
   }
@@ -471,7 +480,7 @@ export async function getPermitFiles(params?: {
   status?: string;
 }): Promise<PermitFile[]> {
   const cacheKey = `permit_files_${JSON.stringify(params || {})}`;
-  const cached = getLocalCache<PermitFileApiItem[]>(cacheKey, 10000);
+  const cached = getLocalCache<PermitFileApiItem[]>(cacheKey, 1800000); // 30 minutes for analytics
   if (cached) {
     apiDebugLog('[API] Using cached permit files');
     return transformPermitFiles(cached);
@@ -921,7 +930,7 @@ export async function getEmployeeTaskStats(employeeCode: string): Promise<unknow
 // Optimized task board functions
 export async function getAllAssignedTasks(): Promise<AssignedTasksResponse> {
   const cacheKey = 'assigned_tasks';
-  const cached = getLocalCache<AssignedTasksResponse>(cacheKey, 15000);
+  const cached = getLocalCache<AssignedTasksResponse>(cacheKey, 300000); // 5 minutes for team stats
   if (cached) {
     apiDebugLog('[API] Using cached assigned tasks');
     return cached;
@@ -993,7 +1002,7 @@ export async function completeTaskWork(taskId: string, employeeCode: string): Pr
 // Team lead and permit file tracking functions
 export async function getTeamLeadTaskStats(): Promise<TeamLeadTaskStatsResponse> {
   const cacheKey = 'team_lead_task_stats';
-  const cached = getLocalCache<TeamLeadTaskStatsResponse>(cacheKey, 60000);
+  const cached = getLocalCache<TeamLeadTaskStatsResponse>(cacheKey, 300000); // 5 minutes for team stats
   if (cached) {
     apiDebugLog('[API] Using cached team lead task stats');
     return cached;
@@ -1019,7 +1028,7 @@ export async function getTeamLeadTaskStats(): Promise<TeamLeadTaskStatsResponse>
 
 export async function getPermitFileTracking(): Promise<PermitFileTrackingResponse> {
   const cacheKey = 'permit_file_tracking';
-  const cached = getLocalCache<PermitFileTrackingResponse>(cacheKey, 5000);
+  const cached = getLocalCache<PermitFileTrackingResponse>(cacheKey, 1800000); // 30 minutes for analytics
   if (cached) {
     apiDebugLog('[API] Using cached permit file tracking');
     return cached;
@@ -1085,7 +1094,7 @@ export async function getEmployeeCompletedTasks(employeeCode: string): Promise<u
 }
 
 // Employee task submission functions
-export async function getMyTasks(employeeCode: string): Promise<unknown> {
+export async function getMyTasks(employeeCode: string): Promise<MyTasksResponse> {
   const response = await fetch(`${API_BASE_URL}/employee-tasks/${employeeCode}`, {
     method: 'GET',
     headers: {
@@ -1100,7 +1109,7 @@ export async function getMyTasks(employeeCode: string): Promise<unknown> {
   return response.json();
 }
 
-export async function submitTaskCompletion(employeeCode: string, taskId: string, completionNotes?: string, hoursWorked?: number): Promise<unknown> {
+export async function submitTaskCompletion(employeeCode: string, taskId: string, completionNotes?: string, hoursWorked?: number): Promise<{ message: string }> {
   const response = await fetch(`${API_BASE_URL}/employee-tasks/${employeeCode}/complete`, {
     method: 'POST',
     headers: {
@@ -1122,7 +1131,7 @@ export async function submitTaskCompletion(employeeCode: string, taskId: string,
 
 export async function getStageTrackingDashboard(): Promise<StageTrackingDashboardResponse> {
   const cacheKey = 'stage_tracking_dashboard';
-  const cached = getLocalCache<StageTrackingDashboardResponse>(cacheKey, 5000);
+  const cached = getLocalCache<StageTrackingDashboardResponse>(cacheKey, 1800000); // 30 minutes for analytics
   if (cached) {
     apiDebugLog('[API] Using cached stage tracking dashboard');
     return cached;
@@ -1213,6 +1222,41 @@ export async function getFilesReadyForStage(stage: string): Promise<unknown> {
   if (!response.ok) {
     throw new Error(`Failed to get files ready for ${stage} stage`);
   }
+  
+  return (await response.json()) as unknown;
+}
+
+export async function getStageConfigs(): Promise<{
+  stage_configs: Array<{
+    stage: string;
+    display_name: string;
+    ideal_minutes: number;
+    max_minutes: number;
+    escalation_minutes: number;
+  }>;
+  total_stages: number;
+}> {
+  const response = await fetch(`${API_BASE_URL}/stage-configs`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+  
+  if (!response.ok) {
+    throw new Error('Failed to fetch stage configurations');
+  }
+  
+  return (await response.json()) as {
+    stage_configs: Array<{
+      stage: string;
+      display_name: string;
+      ideal_minutes: number;
+      max_minutes: number;
+      escalation_minutes: number;
+    }>;
+    total_stages: number;
+  };
   
   return response.json();
 }

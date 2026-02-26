@@ -175,9 +175,9 @@ export function TeamLeadStats({ data }: ReportingManagerStatsProps) {
                         </div>
                       </div>
                       <div className="flex gap-1">
-                        {employee.tasks.slice(0, 3).map((task) => (
+                        {employee.tasks.slice(0, 3).map((task, taskIndex) => (
                           <Badge
-                            key={task.task_id}
+                            key={`${employee.employee_code}-${task.task_id}-${taskIndex}`}
                             variant={
                               task.status === 'COMPLETED' ? 'default' :
                               task.status === 'ASSIGNED' ? 'secondary' : 'outline'

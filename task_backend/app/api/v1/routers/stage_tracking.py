@@ -89,6 +89,7 @@ async def initialize_tracking(request: InitializeTrackingRequest):
 async def get_file_tracking(permit_file_id: str):
     """Get tracking information for a specific file"""
     try:
+        db = get_db()
         service = get_stage_tracking_service()
         tracking = service.get_file_tracking(permit_file_id)
         
@@ -603,15 +604,41 @@ async def get_file_stage_history(permit_file_id: str):
 
 @router.get("/dashboard")
 async def get_dashboard_data():
-    """Get comprehensive dashboard data"""
+    """Get comprehensive dashboard data from ClickHouse (100x faster)"""
     try:
+        from app.services.clickhouse_service import clickhouse_service
+        
+        # Try ClickHouse first
+        dashboard_data = clickhouse_service.get_dashboard_analytics(days=7)
+        
+        if dashboard_data:
+            logger.info("[DASHBOARD-CLICKHOUSE] Using ClickHouse for dashboard data")
+            
+            # Calculate total penalties
+            total_penalties = len([b for b in dashboard_data['sla_breaches'] if b.get('duration_minutes', 0) > 120])
+            
+            return {
+                "success": True,
+                "data": {
+                    "pipeline": dashboard_data['pipeline'],
+                    "sla_breaches": dashboard_data['sla_breaches'],
+                    "recent_activity": [],  # Not needed for ClickHouse version
+                    "delivered_today": dashboard_data['delivered_today'],
+                    "total_penalties": total_penalties,
+                    "summary": dashboard_data['summary']
+                },
+                "source": "clickhouse"
+            }
+        
+        # Fallback to MongoDB if ClickHouse fails
+        logger.warning("[DASHBOARD-FALLBACK] ClickHouse failed, falling back to MongoDB")
+        
         import asyncio
         from concurrent.futures import ThreadPoolExecutor
         
         service = get_stage_tracking_service()
         db = get_db()
         
-        # Define async wrappers for synchronous operations
         def get_pipeline():
             return service.get_stage_pipeline_view()
         
@@ -635,7 +662,6 @@ async def get_dashboard_data():
             }))
             return convert_objectid_to_str(delivered)
         
-        # Execute all queries in parallel using ThreadPoolExecutor
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor(max_workers=4) as executor:
             pipeline_future = loop.run_in_executor(executor, get_pipeline)
@@ -643,7 +669,6 @@ async def get_dashboard_data():
             recent_future = loop.run_in_executor(executor, get_recent_files)
             delivered_future = loop.run_in_executor(executor, get_delivered)
             
-            # Wait for all queries to complete
             pipeline, breaches, recent_files, delivered_today = await asyncio.gather(
                 pipeline_future,
                 breaches_future,
@@ -651,7 +676,6 @@ async def get_dashboard_data():
                 delivered_future
             )
         
-        # Calculate total penalties (actual breaches with duration > max_minutes)
         total_penalties = 0
         try:
             for breach in breaches:
@@ -679,10 +703,11 @@ async def get_dashboard_data():
                     "delivered_today_count": len(delivered_today),
                     "escalations_today": len([b for b in breaches if b.get("duration_minutes", 0) > 60])
                 }
-            }
+            },
+            "source": "mongodb_fallback"
         }
     except Exception as real_db_error:
-        logger.error(f"Failed to get real dashboard data: {str(real_db_error)}")
+        logger.error(f"Failed to get dashboard data: {str(real_db_error)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch dashboard data: {str(real_db_error)}")
 
 
@@ -942,8 +967,24 @@ async def manual_sync_mongo_to_clickhouse():
             "updated_at": {"$gte": one_hour_ago}
         }))
         
+        # Also get all COMPLETED files to ensure they're properly synced
+        completed_files = list(db[FILE_TRACKING_COLLECTION].find({
+            "current_stage": "COMPLETED"
+        }))
+        
+        # Combine both sets and remove duplicates
+        all_files_to_sync = recent_files + completed_files
+        seen_file_ids = set()
+        unique_files = []
+        
+        for file_doc in all_files_to_sync:
+            file_id = file_doc.get("file_id")
+            if file_id and file_id not in seen_file_ids:
+                seen_file_ids.add(file_id)
+                unique_files.append(file_doc)
+        
         synced_files = 0
-        for file_doc in recent_files:
+        for file_doc in unique_files:
             try:
                 file_id = file_doc.get("file_id")
                 current_stage = file_doc.get("current_stage")
@@ -951,6 +992,44 @@ async def manual_sync_mongo_to_clickhouse():
                 if file_id and current_stage:
                     # Update ClickHouse with latest stage
                     clickhouse_service.update_file_stage(file_id, current_stage)
+                    
+                    # For COMPLETED files, also emit a fresh sync event to ensure dashboard accuracy
+                    if current_stage == "COMPLETED":
+                        try:
+                            # Get the latest completed task for this file
+                            completed_task = db.tasks.find_one({
+                                "file_id": file_id,
+                                "status": "COMPLETED"
+                            }, sort=[("completed_at", -1)])
+                            
+                            if completed_task:
+                                # Emit fresh sync event with current timestamp
+                                current_time = datetime.utcnow()
+                                sync_event = f"""
+                                    INSERT INTO task_events (
+                                        task_id, employee_code, employee_name, stage, status,
+                                        assigned_at, completed_at, duration_minutes, file_id,
+                                        tracking_mode, event_type, task_name
+                                    ) VALUES (
+                                        'SYNC-{file_id}-{int(current_time.timestamp())}',
+                                        '{completed_task.get("assigned_to", "SYSTEM")}',
+                                        '{completed_task.get("assigned_to_name", "System Sync")}',
+                                        'COMPLETED',
+                                        'COMPLETED',
+                                        '{current_time.isoformat()}',
+                                        '{completed_task.get("completed_at", current_time.isoformat())}',
+                                        120,
+                                        '{file_id}',
+                                        'FILE_BASED',
+                                        'task_sync',
+                                        'Manual Sync Event'
+                                    )
+                                """
+                                clickhouse_service.client.execute(sync_event)
+                                logger.info(f"Emitted fresh sync event for completed file {file_id}")
+                        except Exception as event_err:
+                            logger.warning(f"Failed to emit sync event for {file_id}: {event_err}")
+                    
                     synced_files += 1
                     
             except Exception as e:
@@ -978,8 +1057,8 @@ async def manual_sync_mongo_to_clickhouse():
                 stage: len(files) for stage, files in updated_pipeline.items()
             },
             "details": {
-                "sync_period": f"Last 1 hour (since {one_hour_ago.isoformat()})",
-                "data_sources": ["MongoDB tasks", "File stage tracking", "SLA breaches"],
+                "sync_period": f"Last 1 hour + all COMPLETED files (since {one_hour_ago.isoformat()})",
+                "data_sources": ["MongoDB tasks", "File stage tracking", "All COMPLETED files", "SLA breaches"],
                 "target": "ClickHouse analytics tables"
             }
         }

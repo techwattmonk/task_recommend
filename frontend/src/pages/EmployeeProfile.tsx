@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { getEmployee, getEmployeeTasks, getEmployeeTaskStats, getEmployeeCompletedTasks } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { Employee, Task } from "@/types";
+import { STAGE_TIME_STANDARDS, getTimingPerformanceColor } from "@/constants/sla";
 
 // Helper function to format dates with proper timezone handling
 const formatDate = (dateString: string | undefined | null): string => {
@@ -92,25 +93,7 @@ const calculateDurationMinutes = (startTime: string, endTime: string): number =>
   }
 };
 
-// Stage configuration with time standards (from backend)
-const STAGE_TIME_STANDARDS = {
-  'PRELIMS': { ideal: 20, max: 30, display: 'Prelims' },
-  'PRODUCTION': { ideal: 210, max: 240, display: 'Production' },
-  'COMPLETED': { ideal: 0, max: 5, display: 'Completed' },
-  'QC': { ideal: 90, max: 120, display: 'Quality Control' },
-  'DELIVERED': { ideal: 0, max: 5, display: 'Delivered' }
-};
-
-// Helper function to get performance color based on timing
-const getTimingPerformanceColor = (actualMinutes: number, idealMinutes: number, maxMinutes: number): { color: string, status: string, variant: 'default' | 'secondary' | 'destructive' | 'outline' } => {
-  if (actualMinutes <= idealMinutes) {
-    return { color: 'text-green-600', status: 'Excellent', variant: 'default' as const };
-  } else if (actualMinutes <= maxMinutes) {
-    return { color: 'text-yellow-600', status: 'Good', variant: 'secondary' as const };
-  } else {
-    return { color: 'text-red-600', status: 'Overdue', variant: 'destructive' as const };
-  }
-};
+// Stage time standards are now imported from shared constants
 
 export default function EmployeeProfile() {
   const { id } = useParams();
@@ -133,127 +116,97 @@ export default function EmployeeProfile() {
   const cameFromTaskBoard = location.state?.from === 'task-board';
   const taskCompleted = location.state?.taskCompleted; // Check if a task was just completed
   
-  useEffect(() => {
-    if (id && id !== 'null' && id !== 'undefined') {
-      console.log('🔍 Loading employee profile for ID:', id);
-      // Load all data in parallel for better performance
-      const loadAllData = async () => {
-        if (!id || id === 'null' || id === 'undefined') {
-          console.error('❌ No employee ID provided');
-          setError('No employee ID provided');
-          setIsLoading(false);
-          return;
-        }
-        
-        setIsLoading(true);
-        try {
-          console.log('🔍 Loading data for employee ID:', id);
-          const [employeeData, tasksData, statsData, completedData] = await Promise.allSettled([
-            getEmployee(id),
-            getEmployeeTasks(id),
-            getEmployeeTaskStats(id),
-            getEmployeeCompletedTasks(id)
-          ]);
-          
-          if (employeeData.status === 'fulfilled') {
-            console.log('✅ Employee data loaded:', employeeData.value);
-            setEmployee(employeeData.value);
-          } else {
-            console.error('❌ Failed to load employee:', employeeData.reason);
-            const errorMsg = employeeData.reason?.toString() || '';
-            if (errorMsg.includes('not found') || errorMsg.includes('404')) {
-              setError(`Employee ${id} not found. Please check the employee code and try again.`);
-              // Optionally redirect to a valid employee after 3 seconds
-              setTimeout(() => {
-                console.log('Redirecting to a valid employee...');
-                navigate('/employees/1030'); // Redirect to a known valid employee
-              }, 3000);
-            } else {
-              setError(`Failed to load employee: ${employeeData.reason}`);
-            }
-          }
-          
-          if (tasksData.status === 'fulfilled') {
-            const td = tasksData.value as any;
-            setAssignedTasks(td.assigned_tasks || td.tasks || []);
-          } else {
-            console.error('❌ Failed to load tasks:', tasksData.reason);
-          }
-          
-          if (statsData.status === 'fulfilled') {
-            setTaskStats(statsData.value);
-          } else {
-            console.error('❌ Failed to load stats:', statsData.reason);
-          }
-          
-          if (completedData.status === 'fulfilled') {
-            const cd = completedData.value as any;
-            setCompletedTasks(cd.completed_tasks || cd.tasks || []);
-          } else {
-            console.error('❌ Failed to load completed tasks:', completedData.reason);
-          }
-        } catch (error) {
-          console.error('❌ Error loading employee data:', error);
-          setError('Failed to load employee data. Please try again.');
-        } finally {
-          setIsLoading(false);
-        }
-      };
+  // Load all data in parallel for better performance
+  const loadAllData = async () => {
+    if (!id || id === 'null' || id === 'undefined') {
+      console.error('❌ No employee ID provided');
+      setError('No employee ID provided');
+      setIsLoading(false);
+      return;
+    }
+    
+    setIsLoading(true);
+    try {
+      console.log('🔍 Loading data for employee ID:', id);
+      const [employeeData, tasksData, statsData, completedData] = await Promise.allSettled([
+        getEmployee(id),
+        getEmployeeTasks(id),
+        getEmployeeTaskStats(id),
+        getEmployeeCompletedTasks(id)
+      ]);
       
-      loadAllData();
-    } else {
-      console.error('❌ No employee ID provided in URL');
-      setError('No employee ID provided. Please navigate from the employee directory.');
+      if (employeeData.status === 'fulfilled') {
+        console.log('✅ Employee data loaded:', employeeData.value);
+        setEmployee(employeeData.value);
+      } else {
+        console.error('❌ Failed to load employee:', employeeData.reason);
+        const errorMsg = employeeData.reason?.toString() || '';
+        if (errorMsg.includes('not found') || errorMsg.includes('404')) {
+          setError('Employee not found');
+        } else {
+          setError('Failed to load employee data');
+        }
+      }
+      
+      if (tasksData.status === 'fulfilled') {
+        const td = tasksData.value as any;
+        setAssignedTasks(td.assigned_tasks || td.tasks || []);
+      } else {
+        console.error('❌ Failed to load tasks:', tasksData.reason);
+      }
+      
+      if (statsData.status === 'fulfilled') {
+        setTaskStats(statsData.value);
+      } else {
+        console.error('❌ Failed to load stats:', statsData.reason);
+      }
+      
+      if (completedData.status === 'fulfilled') {
+        const cd = completedData.value as any;
+        setCompletedTasks(cd.completed_tasks || cd.tasks || []);
+      } else {
+        console.error('❌ Failed to load completed tasks:', completedData.reason);
+      }
+    } catch (error) {
+      console.error('Error in loadAllData:', error);
+      setError('Failed to load employee data');
+    } finally {
       setIsLoading(false);
     }
+  };
+
+  useEffect(() => {
+    loadAllData();
   }, [id]);
 
-  // Refresh data when returning from task board after completing a task
+  // Auto-refresh task stats for live time tracking
   useEffect(() => {
-    if (taskCompleted && id) {
-      console.log('Task completed detected, refreshing employee data...');
-      refreshData();
-    }
-  }, [taskCompleted, id]);
+    if (!id) return;
 
-  const refreshData = async () => {
-    if (id) {
-      setIsLoading(true);
+    // Refresh every 30 seconds for live time updates
+    const interval = setInterval(async () => {
       try {
-        const [employeeData, tasksData, statsData, completedData] = await Promise.allSettled([
-          getEmployee(id),
-          getEmployeeTasks(id),
-          getEmployeeTaskStats(id),
-          getEmployeeCompletedTasks(id)
-        ]);
-        
-        if (employeeData.status === 'fulfilled') {
-          setEmployee(employeeData.value);
-        }
-        
-        if (tasksData.status === 'fulfilled') {
-          const td = tasksData.value as any;
-          setAssignedTasks(td.assigned_tasks || td.tasks || []);
-        }
-        
-        if (statsData.status === 'fulfilled') {
-          console.log('Task stats loaded:', statsData.value);
-          setTaskStats(statsData.value);
-        } else {
-          console.error('Task stats not fulfilled:', statsData.status);
-        }
-        
-        if (completedData.status === 'fulfilled') {
-          const cd = completedData.value as any;
-          setCompletedTasks(cd.completed_tasks || cd.tasks || []);
-        }
+        const statsData = await getEmployeeTaskStats(id);
+        setTaskStats(statsData);
+        console.log('🔄 Task stats refreshed for live time tracking');
       } catch (error) {
-        console.error('Error refreshing data:', error);
-      } finally {
-        setIsLoading(false);
+        console.error('❌ Failed to refresh task stats:', error);
       }
+    }, 30000); // 30 seconds
+
+    return () => clearInterval(interval);
+  }, [id]);
+
+  // Handle navigation state (task completion, etc.)
+  useEffect(() => {
+    if (taskCompleted && employee) {
+      // Show success message if task was just completed
+      toast({
+        title: "Task Completed! 🎉",
+        description: "Great job! Your task has been marked as completed.",
+      });
     }
-  };
+  }, [taskCompleted, employee]);
 
   // Handle skill click - similar to SmartRecommender
   const handleSkillClick = async (skill: string) => {
@@ -378,7 +331,7 @@ export default function EmployeeProfile() {
           {cameFromRecommender ? 'Back to Recommendations' : cameFromTaskBoard ? 'Back to Task Board' : 'Back to Directory'}
         </Button>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={refreshData} disabled={isLoading}>
+          <Button variant="outline" onClick={loadAllData} disabled={isLoading}>
             <RefreshCw className={`h-4 w-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
             Refresh
           </Button>
@@ -701,6 +654,12 @@ export default function EmployeeProfile() {
                     <p className="text-2xl font-bold text-primary">{taskStats.average_hours_per_task}h</p>
                     <p className="text-sm text-muted-foreground mt-1">Avg Hours/Task</p>
                   </div>
+                  {taskStats.active_tasks_live_time > 0 && (
+                    <div className="text-center p-4 rounded-lg bg-orange-50 border border-orange-200">
+                      <p className="text-2xl font-bold text-orange-600">{taskStats.active_tasks_live_time}h</p>
+                      <p className="text-sm text-muted-foreground mt-1">Current Task Time</p>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="text-center py-8">
@@ -868,17 +827,29 @@ export default function EmployeeProfile() {
                     
                     return (
                       <div key={index} className="flex items-center justify-between p-3 rounded-lg border">
-                        <div>
+                        <div className="flex-1">
                           <p className="font-medium">{task.title}</p>
                           <p className="text-sm text-muted-foreground">
                             {task.assigned_at ? formatDate(task.assigned_at) : 'No date'}
                             {task.completed_at ? ` • Completed ${formatDate(task.completed_at)}` : ''}
                             {duration !== 'N/A' && ` • Duration: ${duration}`}
+                            {task.live_hours && task.status !== 'COMPLETED' && (
+                              <span className="text-orange-600 font-medium">
+                                • Live: {task.live_hours}h
+                              </span>
+                            )}
                           </p>
                         </div>
-                        <Badge variant={task.status === 'COMPLETED' ? 'success' : 'warning'}>
-                          {task.status}
-                        </Badge>
+                        <div className="flex flex-col items-end gap-1">
+                          <Badge variant={task.status === 'COMPLETED' ? 'success' : 'warning'}>
+                            {task.status}
+                          </Badge>
+                          {task.live_hours && task.status !== 'COMPLETED' && (
+                            <Badge variant="outline" className="text-xs text-orange-600 border-orange-200">
+                              Live
+                            </Badge>
+                          )}
+                        </div>
                       </div>
                     );
                   })}

@@ -5,11 +5,14 @@ High-performance analytics database for time-series data
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, cast
 from clickhouse_driver import Client
 from app.db.mongodb import get_db
 import pandas as pd
 import re
+
+# Import SLA constants
+from app.constants.sla import STAGE_SLA_THRESHOLDS
 
 logger = logging.getLogger(__name__)
 
@@ -23,28 +26,39 @@ class ClickHouseService:
     
     def __init__(self):
         # Initialize ClickHouse client only if enabled
-        self.client = None
+        self.client: Optional[Client] = None
+
         if CLICKHOUSE_ENABLED:
-            self.client = Client(
-                host='localhost',
-                port=9000,
-                database='task_analytics',
-                # Add authentication if needed
-                # user='default',
-                # password='',
-            # secure=False
-        )
-        self._ensure_tables()
+            try:
+                self.client = Client(
+                    host='localhost',
+                    port=9000,
+                    database='task_analytics',
+                    # Add authentication if needed
+                    # user='default',
+                    # password='',
+                    # secure=False
+                )
+                # Test connection
+                self.client.execute("SELECT 1")
+                logger.info("✅ Connected to ClickHouse")
+                self._ensure_tables()
+            except Exception as e:
+                logger.warning(f"⚠️ ClickHouse connection failed: {e}. Running without ClickHouse analytics.")
+                self.client = None
+        else:
+            logger.info("ClickHouse disabled via configuration.")
     
     def _ensure_tables(self):
         """Create analytics tables if they don't exist"""
-        if not CLICKHOUSE_ENABLED:
+        client = self.client
+        if not CLICKHOUSE_ENABLED or client is None:
             logger.info("ClickHouse is disabled - skipping table creation")
             return
         
         try:
             # Task events table (updated for event-driven analytics)
-            self.client.execute("""
+            client.execute("""
                 CREATE TABLE IF NOT EXISTS task_events (
                     task_id String,
                     employee_code String,
@@ -70,11 +84,12 @@ class ClickHouseService:
             """)
             
             # Employee performance table
-            self.client.execute("""
+            client.execute("""
                 CREATE TABLE IF NOT EXISTS employee_performance (
                     employee_code String,
                     employee_name String,
                     date Date,
+                    last_activity DateTime64(3),
                     tasks_assigned UInt32,
                     tasks_completed UInt32,
                     avg_completion_time Float32,
@@ -83,12 +98,12 @@ class ClickHouseService:
                     sla_breaches UInt32,
                     efficiency_score Float32,
                     stage_performance Map(String, Float32)
-                ) ENGINE = SummingMergeTree()
+                ) ENGINE = ReplacingMergeTree(last_activity)
                 ORDER BY (employee_code, date)
             """)
             
             # SLA analytics table
-            self.client.execute("""
+            client.execute("""
                 CREATE TABLE IF NOT EXISTS sla_metrics (
                     date Date,
                     stage String,
@@ -103,7 +118,7 @@ class ClickHouseService:
             """)
             
             # Real-time metrics table
-            self.client.execute("""
+            client.execute("""
                 CREATE TABLE IF NOT EXISTS realtime_metrics (
                     timestamp DateTime64,
                     metric_name String,
@@ -114,7 +129,7 @@ class ClickHouseService:
             """)
             
             # File lifecycle events table
-            self.client.execute("""
+            client.execute("""
                 CREATE TABLE IF NOT EXISTS file_lifecycle_events (
                     event_id String,
                     file_id String,
@@ -133,7 +148,7 @@ class ClickHouseService:
             """)
             
             # File current state table
-            self.client.execute("""
+            client.execute("""
                 CREATE TABLE IF NOT EXISTS file_current_state (
                     file_id String,
                     current_stage String,
@@ -147,7 +162,7 @@ class ClickHouseService:
             """)
             
             # File events table
-            self.client.execute("""
+            client.execute("""
                 CREATE TABLE IF NOT EXISTS file_events (
                     file_id String,
                     event_type String,
@@ -157,7 +172,7 @@ class ClickHouseService:
             """)
             
             # File lifecycle table (for real-time pipeline tracking)
-            self.client.execute("""
+            client.execute("""
                 CREATE TABLE IF NOT EXISTS file_lifecycle (
                     file_id String,
                     current_stage String,
@@ -170,7 +185,7 @@ class ClickHouseService:
             """)
             
             # Task file map table (for employee-file associations)
-            self.client.execute("""
+            client.execute("""
                 CREATE TABLE IF NOT EXISTS task_file_map (
                     file_id String,
                     task_id String,
@@ -187,6 +202,17 @@ class ClickHouseService:
             
         except Exception as e:
             logger.error(f"Failed to create ClickHouse tables: {e}")
+
+    def calculate_sla_status(self, stage: str, duration_minutes: int) -> str:
+        """Calculate SLA status based on stage-specific thresholds"""
+        thresholds = STAGE_SLA_THRESHOLDS.get(stage, {'ideal': 30, 'max': 60})
+        
+        if duration_minutes <= thresholds['ideal']:
+            return 'within_ideal'
+        elif duration_minutes <= thresholds['max']:
+            return 'over_ideal'
+        else:
+            return 'escalation_needed'
 
     def set_main_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         global _MAIN_EVENT_LOOP
@@ -356,6 +382,7 @@ class ClickHouseService:
                         any(employee_name) AS employee_name,
                         date,
                         stage,
+                        max(assigned_at) as assigned_at,
                         count() AS tasks_assigned_stage,
                         countIf(status = 'COMPLETED') AS tasks_completed_stage,
                         sumIf(duration_minutes, status = 'COMPLETED' AND duration_minutes > 0) AS completed_duration_sum,
@@ -366,13 +393,14 @@ class ClickHouseService:
                     FROM task_events
                     WHERE date >= '{start_date}' AND date < '{end_date}'
                       AND employee_code != ''
-                      AND event_type = 'task_sync'
+                      AND event_type = 'task_assigned'
                     GROUP BY employee_code, date, stage
                 )
                 SELECT
                     employee_code,
                     any(employee_name) AS employee_name,
                     date,
+                    max(assigned_at) AS last_activity,
                     sum(tasks_assigned_stage) AS tasks_assigned,
                     sum(tasks_completed_stage) AS tasks_completed,
                     if(sum(completed_duration_cnt) = 0, 0, sum(completed_duration_sum) / sum(completed_duration_cnt)) AS avg_completion_time,
@@ -453,9 +481,13 @@ class ClickHouseService:
                     priority_latest,
                     status_latest as current_status,
                     CASE
-                        WHEN duration_minutes_latest <= 30 THEN 'within_ideal'
-                        WHEN duration_minutes_latest <= 60 THEN 'over_ideal'
-                        WHEN duration_minutes_latest <= 120 THEN 'over_max'
+                        WHEN stage_latest = 'PRELIMS' AND duration_minutes_latest <= 20 THEN 'within_ideal'
+                        WHEN stage_latest = 'PRELIMS' AND duration_minutes_latest <= 30 THEN 'over_ideal'
+                        WHEN stage_latest = 'PRODUCTION' AND duration_minutes_latest <= 210 THEN 'within_ideal'
+                        WHEN stage_latest = 'PRODUCTION' AND duration_minutes_latest <= 240 THEN 'over_ideal'
+                        WHEN stage_latest = 'QC' AND duration_minutes_latest <= 90 THEN 'within_ideal'
+                        WHEN stage_latest = 'QC' AND duration_minutes_latest <= 120 THEN 'over_ideal'
+                        WHEN stage_latest IN ('COMPLETED', 'DELIVERED') AND duration_minutes_latest <= 5 THEN 'within_ideal'
                         ELSE 'escalation_needed'
                     END as sla_status
                 FROM (
@@ -546,15 +578,16 @@ class ClickHouseService:
                 SELECT 
                     employee_code,
                     employee_name,
+                    max(last_activity) as last_activity,
                     sum(tasks_completed) as total_completed,
                     avg(avg_completion_time) as avg_time,
                     max(max_completion_time) as max_time,
                     sum(sla_breaches) as total_breaches,
                     avg(efficiency_score) as efficiency,
-                    stage_performance
+                    groupArray(stage_performance) as stage_performance
                 FROM employee_performance
                 WHERE date >= today() - {days}
-                GROUP BY employee_code, employee_name, stage_performance
+                GROUP BY employee_code, employee_name
                 ORDER BY total_completed DESC
                 LIMIT {limit}
             """)
@@ -609,7 +642,7 @@ class ClickHouseService:
             logger.error(f"Failed to get real-time metrics: {e}")
             return []
     
-    async def update_real_time_metric(self, metric_name: str, value: float, tags: Dict[str, str] = None):
+    async def update_real_time_metric(self, metric_name: str, value: float, tags: Optional[Dict[str, str]] = None):
         """Update real-time metric"""
         if not CLICKHOUSE_ENABLED or self.client is None:
             return
@@ -660,7 +693,7 @@ class ClickHouseService:
         except Exception as e:
             logger.error(f"Failed to emit file_created event: {e}")
     
-    async def emit_task_assigned_event(self, task_id: str, employee_code: str, employee_name: str, assigned_by: str, file_id_param: str = None, tracking_mode: str = None):
+    async def emit_task_assigned_event(self, task_id: str, employee_code: str, employee_name: str, assigned_by: str, file_id_param: Optional[str] = None, tracking_mode: Optional[str] = None):
         """Emit task assignment event to ClickHouse"""
         if not CLICKHOUSE_ENABLED:
             logger.info(f"ClickHouse disabled - skipping task assignment event for {task_id}")
@@ -703,7 +736,7 @@ class ClickHouseService:
         except Exception as e:
             logger.error(f"Failed to emit task_assigned event: {e}")
     
-    async def emit_stage_started_event(self, task_id: str, employee_code: str, employee_name: str, stage: str, file_id_param: str = None, tracking_mode: str = None):
+    async def emit_stage_started_event(self, task_id: str, employee_code: str, employee_name: str, stage: str, file_id_param: Optional[str] = None, tracking_mode: Optional[str] = None):
         """Emit stage started event to ClickHouse"""
         if not CLICKHOUSE_ENABLED or self.client is None:
             return
@@ -745,7 +778,7 @@ class ClickHouseService:
         except Exception as e:
             logger.error(f"Failed to emit stage_started event: {e}")
     
-    async def emit_stage_completed_event(self, task_id: str, employee_code: str, employee_name: str, stage: str, duration_minutes: int, file_id_param: str = None, tracking_mode: str = None):
+    async def emit_stage_completed_event(self, task_id: str, employee_code: str, employee_name: str, stage: str, duration_minutes: int, file_id_param: Optional[str] = None, tracking_mode: Optional[str] = None):
         """Emit stage completed event to ClickHouse"""
         if not CLICKHOUSE_ENABLED or self.client is None:
             return
@@ -787,7 +820,7 @@ class ClickHouseService:
         except Exception as e:
             logger.error(f"Failed to emit stage_completed event: {e}")
     
-    async def emit_sla_breach_event(self, file_id: str, employee_code: str, employee_name: str, stage: str, sla_status: str, file_id_param: str = None):
+    async def emit_sla_breach_event(self, file_id: str, employee_code: str, employee_name: str, stage: str, sla_status: str, file_id_param: Optional[str] = None):
         """Emit SLA breach event to ClickHouse"""
         if not CLICKHOUSE_ENABLED or self.client is None:
             return
@@ -819,7 +852,7 @@ class ClickHouseService:
         except Exception as e:
             logger.error(f"Failed to emit sla_breach event: {e}")
     
-    def emit_sla_breach_event_sync(self, file_id: str, employee_code: str, employee_name: str, stage: str, sla_status: str, file_id_param: str = None):
+    def emit_sla_breach_event_sync(self, file_id: str, employee_code: str, employee_name: str, stage: str, sla_status: str, file_id_param: Optional[str] = None):
         """Synchronous SLA breach event recorder - NO async calls"""
         # This method now only records the event, does NOT emit
         # Emission is handled by async SLAEventEmitter
@@ -852,7 +885,7 @@ class ClickHouseService:
         except Exception as e:
             logger.error(f"Failed to update file_lifecycle stage: {e}")
     
-    def get_pipeline_view_realtime(self, stage_filter: str = None):
+    def get_pipeline_view_realtime(self, stage_filter: Optional[str] = None):
         """Get pipeline view using file_lifecycle for real-time stage tracking"""
         if not CLICKHOUSE_ENABLED or self.client is None:
             return []
@@ -870,9 +903,14 @@ class ClickHouseService:
                     fl.current_status,
                     fl.sla_deadline,
                     CASE 
-                        WHEN dateDiff('minute', tfm.assigned_at, now64()) <= 30 THEN 'within_ideal'
-                        WHEN dateDiff('minute', tfm.assigned_at, now64()) <= 60 THEN 'over_ideal'
-                        ELSE 'over_max'
+                        WHEN fl.current_stage = 'PRELIMS' AND dateDiff('minute', tfm.assigned_at, now64()) <= 20 THEN 'within_ideal'
+                        WHEN fl.current_stage = 'PRELIMS' AND dateDiff('minute', tfm.assigned_at, now64()) <= 30 THEN 'over_ideal'
+                        WHEN fl.current_stage = 'PRODUCTION' AND dateDiff('minute', tfm.assigned_at, now64()) <= 210 THEN 'within_ideal'
+                        WHEN fl.current_stage = 'PRODUCTION' AND dateDiff('minute', tfm.assigned_at, now64()) <= 240 THEN 'over_ideal'
+                        WHEN fl.current_stage = 'QC' AND dateDiff('minute', tfm.assigned_at, now64()) <= 90 THEN 'within_ideal'
+                        WHEN fl.current_stage = 'QC' AND dateDiff('minute', tfm.assigned_at, now64()) <= 120 THEN 'over_ideal'
+                        WHEN fl.current_stage IN ('COMPLETED', 'DELIVERED') AND dateDiff('minute', tfm.assigned_at, now64()) <= 5 THEN 'within_ideal'
+                        ELSE 'escalation_needed'
                     END as sla_status
                 FROM file_lifecycle fl
                 LEFT JOIN (
@@ -891,6 +929,435 @@ class ClickHouseService:
         except Exception as e:
             logger.error(f"Failed to get real-time pipeline view: {e}")
             return []
+    
+    def get_team_lead_stats(self, days: int = 7):
+        """Get team lead task statistics from ClickHouse with employee task details (last 7 days only)"""
+        if not CLICKHOUSE_ENABLED or self.client is None:
+            return []
+        
+        try:
+            # Get team lead stats with employee breakdown from last 7 days only
+            query = f"""
+                SELECT
+                    team_lead_id as team_lead_code,
+                    employee_code,
+                    any(employee_name) as employee_name,
+                    count() as total_tasks,
+                    countIf(status = 'COMPLETED') as completed_tasks,
+                    countIf(status = 'ASSIGNED') as assigned_tasks,
+                    countIf(status = 'IN_PROGRESS') as in_progress_tasks,
+                    round(completed_tasks / nullIf(total_tasks, 0) * 100, 2) as completion_rate,
+                    groupArray((task_id, task_name, status, toString(assigned_at), toString(completed_at))) as tasks
+                FROM task_events
+                WHERE assigned_at >= now() - INTERVAL {days} DAY
+                  AND team_lead_id != ''
+                  AND employee_code != ''
+                  AND event_type IN ('task_assigned', 'task_sync')
+                GROUP BY team_lead_id, employee_code
+                ORDER BY team_lead_id, total_tasks DESC
+            """
+            
+            results = self.client.execute(query)
+            
+            # Fetch team lead names from MongoDB
+            from app.db.mongodb import get_db
+            db = get_db()
+            team_lead_names = {}
+            unique_team_leads = set(row[0] for row in results)
+            
+            # First, build a mapping of manager codes to names from all employees
+            manager_code_to_name = {}
+            employees = db.employee.find({'reporting_manager': {'$exists': True, '$ne': None}})
+            for emp in employees:
+                rm = emp.get('reporting_manager', '')
+                # Extract code from format like 'Rahul (0081)'
+                if '(' in rm and ')' in rm:
+                    try:
+                        code = rm.split('(')[1].split(')')[0].strip()
+                        name = rm.split('(')[0].strip()
+                        manager_code_to_name[code] = name
+                    except:
+                        pass
+            
+            # Now map team lead codes to names
+            for team_lead_code in unique_team_leads:
+                if team_lead_code in manager_code_to_name:
+                    team_lead_names[team_lead_code] = manager_code_to_name[team_lead_code]
+                else:
+                    # Fallback: try to find employee by this code
+                    employee = db.employee.find_one({'employee_code': team_lead_code})
+                    if employee:
+                        team_lead_names[team_lead_code] = employee.get('employee_name', team_lead_code)
+                    else:
+                        team_lead_names[team_lead_code] = team_lead_code
+            
+            # Group by team lead using plain Dict[str, Any] to allow mutation
+            team_stats: Dict[str, Dict[str, Any]] = {}
+            for row in results:
+                team_lead_code = str(row[0])
+                team_lead_name = team_lead_names.get(team_lead_code, team_lead_code)
+                employee_code = str(row[1])
+                employee_name = str(row[2])
+                total_tasks = int(row[3])
+                completed_tasks = int(row[4])
+                assigned_tasks = int(row[5])
+                in_progress_tasks = int(row[6])
+                tasks = row[8][:10]  # Limit to 10 most recent tasks per employee
+
+                if team_lead_code not in team_stats:
+                    team_stats[team_lead_code] = {
+                        'team_lead_code': team_lead_code,
+                        'team_lead_name': team_lead_name,
+                        'total_employees': 0,
+                        'employees': [],
+                        'task_statistics': {
+                            'total_tasks': 0,
+                            'completed_tasks': 0,
+                            'assigned_tasks': 0,
+                            'in_progress_tasks': 0,
+                            'pending_tasks': 0,
+                            'completion_rate': 0.0
+                        }
+                    }
+
+                # Add employee data
+                employee_tasks: List[Dict[str, Any]] = []
+                for task in tasks:
+                    employee_tasks.append({
+                        'task_id': task[0],
+                        'task_title': task[1],
+                        'status': task[2],
+                        'assigned_at': task[3],
+                        'completed_at': task[4] if task[4] != 'None' else None
+                    })
+
+                team_stats[team_lead_code]['employees'].append({  # type: ignore[union-attr]
+                    'employee_code': employee_code,
+                    'employee_name': employee_name,
+                    'employee_role': 'Employee',  # Can be enhanced with MongoDB lookup
+                    'task_count': len(employee_tasks),
+                    'tasks': employee_tasks
+                })
+
+                # Aggregate stats via explicit cast so type checker knows the shape
+                ts: Dict[str, Any] = cast(Dict[str, Any], team_stats[team_lead_code]['task_statistics'])
+                ts['total_tasks'] = int(ts['total_tasks']) + total_tasks
+                ts['completed_tasks'] = int(ts['completed_tasks']) + completed_tasks
+                ts['assigned_tasks'] = int(ts['assigned_tasks']) + assigned_tasks
+                ts['in_progress_tasks'] = int(ts['in_progress_tasks']) + in_progress_tasks
+                team_stats[team_lead_code]['total_employees'] = int(team_stats[team_lead_code]['total_employees']) + 1  # type: ignore[operator]
+
+            # Calculate completion rates and pending tasks
+            for team_lead_code, stats in team_stats.items():
+                ts_final: Dict[str, Any] = cast(Dict[str, Any], stats['task_statistics'])
+                total_f = float(ts_final.get('total_tasks', 0))
+                completed_f = float(ts_final.get('completed_tasks', 0))
+                ts_final['pending_tasks'] = int(total_f - completed_f)
+                if total_f > 0:
+                    ts_final['completion_rate'] = round((completed_f / total_f) * 100, 2)
+
+            return list(team_stats.values())
+            
+        except Exception as e:
+            logger.error(f"Failed to get team lead stats from ClickHouse: {e}")
+            return []
+    
+    def get_permit_file_tracking_stats(self, days: int = 7, limit: int = 50):
+        """Get permit file tracking statistics from ClickHouse (last 7 days only)"""
+        if not CLICKHOUSE_ENABLED or self.client is None:
+            return []
+        
+        try:
+            query = f"""
+                SELECT
+                    file_id,
+                    argMax(stage, assigned_at) as current_stage,
+                    argMax(status, assigned_at) as current_status,
+                    count() as total_tasks,
+                    countIf(status = 'COMPLETED') as completed_tasks,
+                    countIf(status = 'ASSIGNED') as assigned_tasks,
+                    countIf(status = 'IN_PROGRESS') as in_progress_tasks,
+                    countIf(status IN ('ASSIGNED', 'IN_PROGRESS')) as active_tasks,
+                    round(completed_tasks / nullIf(total_tasks, 0) * 100, 2) as completion_rate,
+                    max(assigned_at) as last_updated,
+                    groupArray((task_id, task_name, status, employee_code, employee_name, toString(assigned_at), toString(completed_at))) as tasks
+                FROM task_events
+                WHERE assigned_at >= now() - INTERVAL {days} DAY
+                  AND file_id != ''
+                  AND tracking_mode = 'FILE_BASED'
+                  AND event_type IN ('task_assigned', 'task_sync')
+                GROUP BY file_id
+                ORDER BY last_updated DESC
+                LIMIT {limit}
+            """
+            
+            results = self.client.execute(query)
+            
+            # Fetch client names from MongoDB permit_files collection
+            from app.db.mongodb import get_db
+            db = get_db()
+            file_names = {}
+            unique_file_ids = set(row[0] for row in results)
+            for file_id in unique_file_ids:
+                permit_file = db.permit_files.find_one({'permit_file_id': file_id})
+                if permit_file:
+                    # Use original_filename field if available, otherwise client_name or permit_file_name
+                    client_name = permit_file.get('original_filename') or permit_file.get('client_name') or permit_file.get('permit_file_name') or file_id
+                    file_names[file_id] = client_name
+                else:
+                    file_names[file_id] = file_id
+            
+            permit_files = []
+            for row in results:
+                file_id = row[0]
+                file_name = file_names.get(file_id, file_id)
+                current_stage = row[1]
+                current_status = row[2]
+                total_tasks = row[3]
+                completed_tasks = row[4]
+                assigned_tasks = row[5]
+                in_progress_tasks = row[6]
+                active_tasks = row[7]
+                completion_rate = row[8]
+                last_updated = row[9]
+                tasks_data = row[10][:10]  # Limit to 10 most recent tasks
+                
+                tasks = []
+                for task in tasks_data:
+                    tasks.append({
+                        'task_id': task[0],
+                        'title': task[1],
+                        'status': task[2],
+                        'assigned_to': task[3],
+                        'employee_name': task[4],
+                        'employee_role': 'Employee',
+                        'assigned_at': task[5],
+                        'completed_at': task[6] if task[6] != 'None' else None
+                    })
+                
+                permit_files.append({
+                    'file_id': file_id,
+                    'file_name': file_name,  # Add client name
+                    'current_stage': current_stage,
+                    'status': current_status,
+                    'total_tasks': total_tasks,
+                    'completed_tasks': completed_tasks,
+                    'assigned_tasks': assigned_tasks,
+                    'in_progress_tasks': in_progress_tasks,
+                    'active_tasks': active_tasks,
+                    'completion_rate': completion_rate,
+                    'updated_at': str(last_updated),
+                    'tasks': tasks
+                })
+            
+            return permit_files
+            
+        except Exception as e:
+            logger.error(f"Failed to get permit file tracking from ClickHouse: {e}")
+            return []
+    
+    def get_dashboard_analytics(self, days: int = 7):
+        """Get complete dashboard analytics from ClickHouse"""
+        if not CLICKHOUSE_ENABLED or self.client is None:
+            return None
+        
+        try:
+            # Get pipeline view grouped by stage
+            pipeline_query = f"""
+                SELECT
+                    argMax(stage, assigned_at) as current_stage,
+                    file_id,
+                    argMax(employee_code, assigned_at) as employee_code,
+                    argMax(employee_name, assigned_at) as employee_name,
+                    argMax(status, assigned_at) as current_status,
+                    max(assigned_at) as last_assigned,
+                    dateDiff('minute', max(assigned_at), now64()) as duration_minutes
+                FROM task_events
+                WHERE assigned_at >= now() - INTERVAL {days} DAY
+                  AND file_id != ''
+                  AND tracking_mode = 'FILE_BASED'
+                  AND event_type IN ('task_assigned', 'stage_started', 'task_sync')
+                GROUP BY file_id
+                HAVING current_stage NOT IN ('COMPLETED', 'DELIVERED')
+                ORDER BY last_assigned DESC
+            """
+            
+            pipeline_results = self.client.execute(pipeline_query)
+            
+            # Group by stage - include completed files
+            pipeline = {
+                "PRELIMS": [],
+                "PRODUCTION": [],
+                "QC": [],
+                "COMPLETED": [],
+                "DELIVERED": []
+            }
+            
+            # Also get completed files separately
+            completed_query = f"""
+                SELECT
+                    argMax(stage, assigned_at) as current_stage,
+                    file_id,
+                    argMax(employee_code, assigned_at) as employee_code,
+                    argMax(employee_name, assigned_at) as employee_name,
+                    argMax(status, assigned_at) as current_status,
+                    max(assigned_at) as last_assigned,
+                    dateDiff('minute', max(assigned_at), now64()) as duration_minutes
+                FROM task_events
+                WHERE assigned_at >= now() - INTERVAL {days} DAY
+                  AND file_id != ''
+                  AND tracking_mode = 'FILE_BASED'
+                  AND event_type IN ('task_assigned', 'stage_started', 'task_sync')
+                GROUP BY file_id
+                HAVING current_stage IN ('COMPLETED', 'DELIVERED')
+                ORDER BY last_assigned DESC
+            """
+            
+            completed_results = self.client.execute(completed_query)
+            logger.info(f"Found {len(completed_results)} completed files for dashboard")
+            
+            for row in pipeline_results:
+                stage = row[0]
+                file_id = row[1]
+                employee_code = row[2]
+                employee_name = row[3]
+                status = row[4]
+                last_assigned = row[5]
+                duration_minutes = row[6]
+                
+                # Map ASSIGNED to PRELIMS for pipeline display
+                if stage == 'ASSIGNED':
+                    stage = 'PRELIMS'
+                
+                # Calculate SLA status using stage-specific thresholds
+                sla_status = self.calculate_sla_status(stage, duration_minutes)
+                
+                file_data = {
+                    'file_id': file_id,
+                    'current_stage': stage,
+                    'current_status': status,
+                    'current_assignment': {
+                        'employee_code': employee_code,
+                        'employee_name': employee_name
+                    },
+                    'employee_name': employee_name,
+                    'duration_minutes': duration_minutes,
+                    'sla_status': sla_status,
+                    'updated_at': str(last_assigned)
+                }
+                
+                if stage in pipeline:
+                    pipeline[stage].append(file_data)
+            
+            # Process completed files
+            for row in completed_results:
+                stage = row[0]
+                file_id = row[1]
+                employee_code = row[2]
+                employee_name = row[3]
+                status = row[4]
+                last_assigned = row[5]
+                duration_minutes = row[6]
+                
+                # Create file data for completed files
+                file_data = {
+                    'file_id': file_id,
+                    'current_stage': stage,
+                    'current_assignment': {
+                        'employee_code': employee_code,
+                        'employee_name': employee_name
+                    },
+                    'employee_name': employee_name,
+                    'duration_minutes': duration_minutes,
+                    'sla_status': 'completed',
+                    'updated_at': str(last_assigned)
+                }
+                
+                if stage in pipeline:
+                    pipeline[stage].append(file_data)
+            
+            # Get SLA breaches
+            breach_query = f"""
+                SELECT
+                    file_id,
+                    argMax(stage, assigned_at) as current_stage,
+                    argMax(employee_code, assigned_at) as employee_code,
+                    argMax(employee_name, assigned_at) as employee_name,
+                    dateDiff('minute', max(assigned_at), now64()) as duration_minutes
+                FROM task_events
+                WHERE assigned_at >= now() - INTERVAL {days} DAY
+                  AND file_id != ''
+                  AND tracking_mode = 'FILE_BASED'
+                GROUP BY file_id
+                HAVING duration_minutes > 60
+                ORDER BY duration_minutes DESC
+                LIMIT 100
+            """
+            
+            breach_results = self.client.execute(breach_query)
+            
+            sla_breaches = []
+            for row in breach_results:
+                stage = row[1]
+                # Map ASSIGNED to PRELIMS for consistency
+                if stage == 'ASSIGNED':
+                    stage = 'PRELIMS'
+                    
+                sla_breaches.append({
+                    'file_id': row[0],
+                    'current_stage': stage,
+                    'current_assignment': {
+                        'employee_code': row[2],
+                        'employee_name': row[3]
+                    },
+                    'employee_name': row[3],
+                    'duration_minutes': row[4],
+                    'sla_status': 'escalation_needed' if row[4] > 120 else 'over_max'
+                })
+            
+            # Get recent activity (delivered today)
+            delivered_query = f"""
+                SELECT
+                    file_id,
+                    argMax(employee_code, assigned_at) as employee_code,
+                    argMax(employee_name, assigned_at) as employee_name,
+                    max(completed_at) as delivered_at
+                FROM task_events
+                WHERE toDate(assigned_at) = today()
+                  AND file_id != ''
+                  AND status = 'DELIVERED'
+                GROUP BY file_id
+                ORDER BY delivered_at DESC
+                LIMIT 50
+            """
+            
+            delivered_results = self.client.execute(delivered_query)
+            
+            delivered_today = []
+            for row in delivered_results:
+                delivered_today.append({
+                    'file_id': row[0],
+                    'employee_code': row[1],
+                    'employee_name': row[2],
+                    'delivered_at': str(row[3])
+                })
+            
+            return {
+                'pipeline': pipeline,
+                'sla_breaches': sla_breaches,
+                'delivered_today': delivered_today,
+                'summary': {
+                    'total_files': sum(len(files) for files in pipeline.values()),
+                    'active_files': sum(len(files) for stage, files in pipeline.items() if stage not in ['COMPLETED', 'DELIVERED']),
+                    'breaches_count': len(sla_breaches),
+                    'delivered_today_count': len(delivered_today),
+                    'escalations_today': len([b for b in sla_breaches if b['duration_minutes'] > 120])
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get dashboard analytics from ClickHouse: {e}")
+            return None
 
 # Global ClickHouse service instance
 clickhouse_service = ClickHouseService()

@@ -7,10 +7,10 @@ import { componentTagger } from "lovable-tagger";
 export default defineConfig(({ mode }) => ({
   server: {
     host: "::",
-    port: 8080,
+    port: 5018,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://localhost:4001',
         changeOrigin: true,
         secure: false,
       }
@@ -21,5 +21,9 @@ export default defineConfig(({ mode }) => ({
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
+  },
+  build: {
+    outDir: 'dist',
+    sourcemap: true,
   },
 }));

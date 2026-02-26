@@ -28,14 +28,16 @@ class MongoDBConnection:
         try:
             self._client = MongoClient(
                 settings.mongodb_uri,
-                maxPoolSize=10,
-                minPoolSize=5,
-                maxIdleTimeMS=30000,
-                serverSelectionTimeoutMS=5000,
-                connectTimeoutMS=10000,
-                socketTimeoutMS=20000,
+                maxPoolSize=15,
+                minPoolSize=3,
+                maxIdleTimeMS=60000,
+                serverSelectionTimeoutMS=7000,
+                connectTimeoutMS=15000,
+                socketTimeoutMS=30000,
                 retryWrites=True,
-                w="majority"
+                retryReads=True,
+                w="majority",
+                readPreference="secondaryPreferred"
             )
             self._db = self._client[settings.mongodb_db]
             logger.info(f"Connected to MongoDB: {settings.mongodb_db}")
@@ -64,5 +66,15 @@ class MongoDBConnection:
 _mongo_connection = MongoDBConnection()
 
 def get_db():
-    """Get MongoDB database instance with connection pooling"""
-    return _mongo_connection.get_database()
+    """Get MongoDB database instance with connection pooling and health check"""
+    try:
+        db = _mongo_connection.get_database()
+        # Health check - ping the database
+        db.command('ping')
+        return db
+    except Exception as e:
+        logger.warning(f"MongoDB health check failed, attempting reconnect: {str(e)}")
+        # Force reconnection
+        _mongo_connection._client = None
+        _mongo_connection._connect()
+        return _mongo_connection.get_database()

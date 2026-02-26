@@ -47,7 +47,7 @@ class RecommendationEngine:
         self.skill_normalizer = SkillNormalizer()
         self._employee_cache = {}
         self._cache_timestamp = None
-        self._cache_ttl = 300  # 5 minutes
+        self._cache_ttl = 1800  # 30 minutes (optimized for employee data)
     
     def _extract_team_lead_code(self, team_lead: str) -> Optional[str]:
         """Extract team lead code from name string."""
@@ -343,7 +343,7 @@ class RecommendationEngine:
         self,
         task_description: str,
         team_lead_code: Optional[str] = None,
-        top_k: int = 10,
+        top_k: int = 3,
         min_score: float = 0.3,
         file_id: Optional[str] = None,
         current_file_stage: Optional[str] = None

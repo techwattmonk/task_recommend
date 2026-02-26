@@ -1,11 +1,16 @@
 version: '3.8'
 
 services:
+
+  # -------------------------------
   # ClickHouse Database
+  # -------------------------------
   clickhouse:
     image: clickhouse/clickhouse-server:23.8
     container_name: task_clickhouse
     restart: unless-stopped
+    mem_limit: 2g
+    cpus: 1.5
     ports:
       - "8123:8123"
       - "9000:9000"
@@ -18,8 +23,16 @@ services:
       CLICKHOUSE_PASSWORD: ""
     networks:
       - task_network
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
+
+  # -------------------------------
   # Backend API
+  # -------------------------------
   backend:
     build:
       context: .
@@ -27,7 +40,7 @@ services:
     container_name: task_backend
     restart: unless-stopped
     ports:
-      - "4001:4001"  # External port 4001 -> Internal port 8000
+      - "4001:4001"
     environment:
       - MONGODB_URL=mongodb://admin:password@mongodb:27017/task_assignee?authSource=admin
       - MYSQL_HOST=mysql
@@ -39,21 +52,22 @@ services:
       - CLICKHOUSE_PORT=9000
       - CLICKHOUSE_DATABASE=task_analytics
     depends_on:
-      - clickhouse
+      clickhouse:
+        condition: service_healthy
     volumes:
       - ./logs:/app/logs
     networks:
       - task_network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:4001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
 
+
 volumes:
-  mongodb_data:
-  mysql_data:
   clickhouse_data:
+
 
 networks:
   task_network:

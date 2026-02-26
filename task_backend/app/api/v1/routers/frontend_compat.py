@@ -1,10 +1,13 @@
 """
 Additional endpoints for frontend compatibility
 """
-from fastapi import APIRouter
+import logging
+from fastapi import APIRouter, HTTPException
 from app.api.v1.routers.employees import router as employees_router
 from app.api.v1.routers.permit_files import router as permit_files_router
 from app.api.v1.routers.tasks import router as tasks_router
+
+logger = logging.getLogger(__name__)
 
 # Create additional endpoints that frontend expects
 router = APIRouter()
@@ -137,57 +140,87 @@ async def get_employees_grouped_by_team_lead():
         }
 
 # Tasks endpoints
-@router.get("/tasks/completed-today")
-async def get_tasks_completed_today():
+@router.get("/tasks/completed/today")
+async def get_completed_tasks():
     """Get tasks completed today"""
     from app.db.mongodb import get_db
     from datetime import datetime, timedelta
+    from pymongo.errors import NetworkTimeout, OperationFailure
     
-    db = get_db()
-    today = datetime.now().date()
-    start_of_day = datetime.combine(today, datetime.min.time())
-    end_of_day = datetime.combine(today, datetime.max.time())
-    
-    tasks = list(db.tasks.find({
-        "status": "COMPLETED",
-        "completed_at": {"$gte": start_of_day, "$lte": end_of_day}
-    }, {"_id": 0}))
-    
-    return tasks  # Return array directly
+    try:
+        db = get_db()
+        today = datetime.now().date()
+        start_of_day = datetime.combine(today, datetime.min.time())
+        end_of_day = datetime.combine(today, datetime.max.time())
+        
+        tasks = list(db.tasks.find({
+            "status": "COMPLETED",
+            "completed_at": {"$gte": start_of_day, "$lte": end_of_day}
+        }, {"_id": 0}).max_time_ms(3000))  # 3 second timeout
+        
+        return tasks  # Return array directly
+    except NetworkTimeout as e:
+        logger.warning(f"MongoDB timeout fetching completed tasks: {str(e)}")
+        return []
+    except OperationFailure as e:
+        logger.warning(f"MongoDB operation failed fetching completed tasks: {str(e)}")
+        return []
+    except Exception as e:
+        logger.error(f"Unexpected error fetching completed tasks: {str(e)}")
+        return []
 
 @router.get("/tasks/recent-activity")
 async def get_recent_activity():
     """Get recent task activity"""
     from app.db.mongodb import get_db
     from datetime import datetime, timedelta
+    from pymongo.errors import NetworkTimeout, OperationFailure
     
-    db = get_db()
-    seven_days_ago = datetime.now() - timedelta(days=7)
-    
-    activities = list(db.tasks.find({
-        "$or": [
-            {"metadata.created_at": {"$gte": seven_days_ago}},
-            {"assigned_at": {"$gte": seven_days_ago}}
-        ]
-    }, {"_id": 0}).sort("assigned_at", -1).limit(20))
-    
-    return activities  # Return array directly
+    try:
+        db = get_db()
+        seven_days_ago = datetime.now() - timedelta(days=7)
+        
+        activities = list(db.tasks.find({
+            "$or": [
+                {"metadata.created_at": {"$gte": seven_days_ago}},
+                {"assigned_at": {"$gte": seven_days_ago}}
+            ]
+        }, {"_id": 0}).sort("assigned_at", -1).limit(20).max_time_ms(3000))  # 3 second timeout
+        
+        return activities  # Return array directly
+    except NetworkTimeout as e:
+        logger.warning(f"MongoDB timeout fetching recent activity: {str(e)}")
+        return []
+    except OperationFailure as e:
+        logger.warning(f"MongoDB operation failed fetching recent activity: {str(e)}")
+        return []
+    except Exception as e:
+        logger.error(f"Unexpected error fetching recent activity: {str(e)}")
+        return []
 
 @router.get("/tasks/assigned")
 async def get_assigned_tasks():
     """Get all assigned tasks"""
     from app.db.mongodb import get_db
+    from pymongo.errors import NetworkTimeout, OperationFailure
     
     try:
         db = get_db()
         # Add timeout and error handling
         tasks = list(db.tasks.find({
             "status": {"$ne": "COMPLETED"}
-        }, {"_id": 0}).max_time_ms(5000))  # 5 second timeout
+        }, {"_id": 0}).max_time_ms(3000))  # 3 second timeout
         
         return tasks  # Return array directly
+    except NetworkTimeout as e:
+        logger.warning(f"MongoDB timeout fetching assigned tasks: {str(e)}")
+        # Return empty array on timeout to prevent frontend crashes
+        return []
+    except OperationFailure as e:
+        logger.warning(f"MongoDB operation failed: {str(e)}")
+        return []
     except Exception as e:
-        logger.error(f"Error fetching assigned tasks: {str(e)}")
+        logger.error(f"Unexpected error fetching assigned tasks: {str(e)}")
         # Return empty array on error to prevent frontend crashes
         return []
 
@@ -196,6 +229,7 @@ async def get_assigned_tasks():
 async def get_unassigned_permit_files():
     """Get unassigned permit files"""
     from app.db.mongodb import get_db
+    from pymongo.errors import NetworkTimeout, OperationFailure
     
     try:
         db = get_db()
@@ -205,9 +239,15 @@ async def get_unassigned_permit_files():
                 {"assigned_to": ""},
                 {"status": "uploaded"}
             ]
-        }, {"_id": 0}).max_time_ms(5000))  # 5 second timeout
+        }, {"_id": 0}).max_time_ms(3000))  # 3 second timeout
         
         return files  # Return array directly, not object
+    except NetworkTimeout as e:
+        logger.warning(f"MongoDB timeout fetching unassigned permit files: {str(e)}")
+        return []
+    except OperationFailure as e:
+        logger.warning(f"MongoDB operation failed fetching permit files: {str(e)}")
+        return []
     except Exception as e:
-        logger.error(f"Error fetching unassigned permit files: {str(e)}")
+        logger.error(f"Unexpected error fetching unassigned permit files: {str(e)}")
         return []

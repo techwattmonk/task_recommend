@@ -38,20 +38,26 @@ logging.getLogger("pymongo.topology").setLevel(logging.WARNING)
 
 app = FastAPI(title=settings.app_name, version="1.0.0")
 
-# CORS middleware - Explicitly allow localhost origins
+# CORS middleware - Allow frontend origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
+        # Development origins
+        "http://localhost:5018",
+        "http://127.0.0.1:5018",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "*"  # Fallback for development
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        # Production origins (uncomment and update for production)
+        # "https://yourdomain.com",
+        # "https://www.yourdomain.com",
+        # "https://api.yourdomain.com",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
     expose_headers=["*"]
 )
@@ -186,6 +192,7 @@ from app.api.v1.routers.websockets import router as websockets_router
 from app.api.v1.routers.notifications import router as notifications_router
 from app.api.v1.routers.websocket_events import websocket_endpoint, event_stream, websocket_manager
 from app.api.v1.routers.frontend_compat import router as frontend_compat_router
+from app.api.v1.routers.stage_configs import router as stage_configs_router
 
 # Temporal routers commented out temporarily
 # logger.info("🔥 Including temporal_integration router...")
@@ -237,6 +244,8 @@ logger.info("🔥 Including MySQL admin router...")
 app.include_router(mysql_admin_router, prefix="/api/v1")
 logger.info("🔥 Including frontend compatibility router...")
 app.include_router(frontend_compat_router, prefix="/api/v1")
+logger.info("🔥 Including stage configs router...")
+app.include_router(stage_configs_router, prefix="/api/v1")
 # Temporal routers commented out temporarily
 # logger.info("🔥 Including temporal automation router...")
 # app.include_router(temporal_automation_router, prefix="/api/v1")

@@ -164,7 +164,7 @@ async def submit_task_completion(employee_code: str, submission: TaskSubmission)
                     "status": "COMPLETED",
                     "completed_at": completion_time,
                     "completion_notes": submission.completion_notes,
-                    "employee_hours_worked": hours_worked,
+                    "hours_worked": hours_worked,
                     "metadata.updated_at": completion_time
                 }
             }
@@ -275,11 +275,18 @@ async def submit_task_completion(employee_code: str, submission: TaskSubmission)
                         )
                 
                 # Complete stage and progress to next stage
-                stage_progression_result = stage_service.complete_stage_and_progress(
-                    file_id, employee_code, employee_name
-                )
-                
-                logger.info(f"[DEBUG] Stage progression result: {stage_progression_result}")
+                # For QC tasks, use complete_stage to trigger auto-progression to DELIVERED
+                # For other stages, use complete_stage_and_progress
+                if task_stage == "QC":
+                    stage_progression_result = stage_service.complete_stage(
+                        file_id, employee_code, f"QC task {submission.task_id} completed"
+                    )
+                    logger.info(f"[DEBUG] QC stage completion result: {stage_progression_result}")
+                else:
+                    stage_progression_result = stage_service.complete_stage_and_progress(
+                        file_id, employee_code, employee_name
+                    )
+                    logger.info(f"[DEBUG] Stage progression result: {stage_progression_result}")
                 
             except Exception as e:
                 logger.error(f"[ERROR] Failed to trigger stage progression for file {file_id}: {str(e)}", exc_info=True)
