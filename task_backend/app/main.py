@@ -51,10 +51,11 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:8080",
         "http://127.0.0.1:8080",
-        # Production origins (uncomment and update for production)
-        # "https://yourdomain.com",
-        # "https://www.yourdomain.com",
-        # "https://api.yourdomain.com",
+        # Production origins
+        "https://assignly.framesense.ai",
+        "https://wattwatch-backend.framesense.ai",
+        "https://framesense.ai",
+        "https://www.framesense.ai",
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
