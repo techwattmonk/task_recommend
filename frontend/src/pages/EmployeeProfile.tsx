@@ -11,7 +11,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { getEmployee, getEmployeeTasks, getEmployeeTaskStats, getEmployeeCompletedTasks } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { Employee, Task } from "@/types";
-import { STAGE_TIME_STANDARDS, getTimingPerformanceColor } from "@/constants/sla";
+import { SlaConfig, StageThreshold } from "@/types/sla";
+import { getTimingPerformanceColor } from "@/constants/sla";
 
 // Helper function to format dates with proper timezone handling
 const formatDate = (dateString: string | undefined | null): string => {
@@ -105,6 +106,8 @@ export default function EmployeeProfile() {
   const [taskStats, setTaskStats] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [slaConfig, setSlaConfig] = useState<Record<string, StageThreshold>>({});
+  const [slaConfigLoading, setSlaConfigLoading] = useState(true);
   
   // Skill modal state
   const [selectedSkill, setSelectedSkill] = useState<string>("");
@@ -116,6 +119,42 @@ export default function EmployeeProfile() {
   const cameFromTaskBoard = location.state?.from === 'task-board';
   const taskCompleted = location.state?.taskCompleted; // Check if a task was just completed
   
+  // Fetch SLA config from backend
+  const fetchSlaConfig = async () => {
+    try {
+      const response = await fetch('/api/v1/stage-configs');
+      if (!response.ok) {
+        throw new Error('Failed to fetch SLA config');
+      }
+      const data = await response.json();
+      
+      // Transform API response to StageThreshold format
+      const config: Record<string, StageThreshold> = {};
+      data.stage_configs.forEach((stage: SlaConfig) => {
+        config[stage.stage] = {
+          ideal: stage.ideal_minutes,
+          max: stage.max_minutes,
+          display: stage.display_name
+        };
+      });
+      
+      setSlaConfig(config);
+      console.log('✅ SLA config loaded:', config);
+    } catch (error) {
+      console.error('❌ Failed to load SLA config:', error);
+      // Fallback to default values
+      setSlaConfig({
+        'PRELIMS': { ideal: 20, max: 30, display: 'Prelims' },
+        'PRODUCTION': { ideal: 210, max: 240, display: 'Production' },
+        'COMPLETED': { ideal: 0, max: 5, display: 'Completed' },
+        'QC': { ideal: 90, max: 120, display: 'Quality Control' },
+        'DELIVERED': { ideal: 0, max: 5, display: 'Delivered' }
+      });
+    } finally {
+      setSlaConfigLoading(false);
+    }
+  };
+
   // Load all data in parallel for better performance
   const loadAllData = async () => {
     if (!id || id === 'null' || id === 'undefined') {
@@ -177,6 +216,7 @@ export default function EmployeeProfile() {
 
   useEffect(() => {
     loadAllData();
+    fetchSlaConfig(); // Fetch SLA config from backend
   }, [id]);
 
   // Auto-refresh task stats for live time tracking
@@ -684,9 +724,10 @@ export default function EmployeeProfile() {
                     const durationMinutes = calculateDurationMinutes(task.assigned_at, task.completed_at);
                     const duration = calculateDuration(task.assigned_at, task.completed_at);
                     
-                    // Get performance metrics (using generic task standards since we don't have stage info)
-                    const idealMinutes = 120; // Generic 2-hour standard
-                    const maxMinutes = 240;   // Generic 4-hour max
+                    // Get performance metrics using fetched SLA config
+                    const stageThreshold = slaConfig[task.stage || 'PRELIMS'] || { ideal: 120, max: 240 };
+                    const idealMinutes = stageThreshold.ideal;
+                    const maxMinutes = stageThreshold.max;
                     const performance = getTimingPerformanceColor(durationMinutes, idealMinutes, maxMinutes);
                     
                     return (
